@@ -1,0 +1,1828 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pixhawk Log Reader Dashboard</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@300;400;500;600;700&family=Orbitron:wght@400;600;900&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg:       #020508;
+            --bg1:      #060d12;
+            --bg2:      #0a1520;
+            --bg3:      #0d1e2e;
+            --border:   #0e2233;
+            --border2:  #163040;
+            --cyan:     #00d4ff;
+            --cyan-dim: #007a99;
+            --amber:    #ffaa00;
+            --amber-dim:#7a5000;
+            --green:    #00ff88;
+            --red:      #ff2244;
+            --text:     #b8cdd6;
+            --text-dim: #4a6070;
+            --text-bright: #e8f4f8;
+            --mono: 'Share Tech Mono', monospace;
+            --head: 'Orbitron', monospace;
+            --body: 'Rajdhani', sans-serif;
+        }
+
+        *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+        html { scroll-behavior: smooth; }
+        body {
+            font-family: var(--body);
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            overflow-x: hidden;
+            background-image:
+                repeating-linear-gradient(
+                    0deg,
+                    transparent,
+                    transparent 2px,
+                    rgba(0,212,255,0.012) 2px,
+                    rgba(0,212,255,0.012) 4px
+                );
+        }
+
+        ::-webkit-scrollbar { width:4px; }
+        ::-webkit-scrollbar-track { background: var(--bg1); }
+        ::-webkit-scrollbar-thumb { background: var(--border2); border-radius:2px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--cyan-dim); }
+
+        .bracket {
+            position: relative;
+        }
+        .bracket::before, .bracket::after {
+            content: '';
+            position: absolute;
+            width: 12px; height: 12px;
+            border-color: var(--cyan);
+            border-style: solid;
+            pointer-events: none;
+        }
+        .bracket::before { top:0; left:0; border-width:1px 0 0 1px; }
+        .bracket::after  { bottom:0; right:0; border-width:0 1px 1px 0; }
+
+        header {
+            position: relative;
+            background: var(--bg1);
+            padding: 0 40px;
+            height: 64px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border);
+            overflow: hidden;
+        }
+        header::after {
+            content: '';
+            position: absolute;
+            bottom: 0; left: 0; right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent 0%, var(--cyan) 30%, var(--amber) 70%, transparent 100%);
+            opacity: 0.6;
+        }
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+        .header-logo {
+            font-family: var(--head);
+            font-size: 13px;
+            font-weight: 900;
+            letter-spacing: 4px;
+            color: var(--cyan);
+            text-transform: uppercase;
+        }
+        .header-logo span { color: var(--amber); }
+        .header-divider {
+            width: 1px; height: 28px;
+            background: var(--border2);
+        }
+        .header-sub {
+            font-family: var(--mono);
+            font-size: 10px;
+            color: var(--text-dim);
+            letter-spacing: 2px;
+            text-transform: uppercase;
+        }
+        .header-right {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+        .header-status {
+            font-family: var(--mono);
+            font-size: 10px;
+            color: var(--text-dim);
+            letter-spacing: 1px;
+        }
+        .status-dot {
+            display: inline-block;
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: var(--green);
+            margin-right: 6px;
+            box-shadow: 0 0 6px var(--green);
+            animation: blink 2s ease-in-out infinite;
+        }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+        .upload-section {
+            background: var(--bg1);
+            padding: 10px 40px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+        .file-input-wrapper {
+            position: relative;
+            display: inline-block;
+        }
+        .file-input-wrapper input[type=file] {
+            position: absolute;
+            left: -9999px;
+        }
+        .file-input-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 20px;
+            background: transparent;
+            color: var(--cyan);
+            border: 1px solid var(--cyan);
+            cursor: pointer;
+            font-family: var(--mono);
+            font-size: 11px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            transition: all 0.2s;
+            clip-path: polygon(8px 0%, 100% 0%, calc(100% - 8px) 100%, 0% 100%);
+        }
+        .file-input-label:hover {
+            background: rgba(0,212,255,0.08);
+            box-shadow: 0 0 16px rgba(0,212,255,0.2);
+            color: #fff;
+        }
+        .upload-info {
+            font-family: var(--mono);
+            font-size: 11px;
+            color: var(--text-dim);
+            letter-spacing: 1px;
+        }
+        .upload-info.loading {
+            color: var(--amber);
+            animation: pulse 1s ease-in-out infinite;
+        }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+        nav {
+            background: var(--bg1);
+            display: flex;
+            gap: 0;
+            border-bottom: 1px solid var(--border);
+            overflow-x: auto;
+        }
+        nav::-webkit-scrollbar { height: 2px; }
+        .nav-btn {
+            flex-shrink: 0;
+            padding: 12px 22px;
+            background: transparent;
+            color: var(--text-dim);
+            border: none;
+            border-right: 1px solid var(--border);
+            cursor: pointer;
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            transition: all 0.2s;
+            position: relative;
+        }
+        .nav-btn::after {
+            content: '';
+            position: absolute;
+            bottom: 0; left: 0; right: 0;
+            height: 2px;
+            background: var(--cyan);
+            transform: scaleX(0);
+            transition: transform 0.2s;
+        }
+        .nav-btn:hover:not(:disabled) {
+            color: var(--text-bright);
+            background: rgba(0,212,255,0.04);
+        }
+        .nav-btn:hover:not(:disabled)::after { transform: scaleX(1); }
+        .nav-btn.active {
+            color: var(--cyan);
+            background: rgba(0,212,255,0.06);
+        }
+        .nav-btn.active::after { transform: scaleX(1); }
+        .nav-btn:disabled {
+            opacity: 0.25;
+            cursor: not-allowed;
+        }
+
+        .container {
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 28px 24px;
+        }
+
+        .page { display: none; animation: pageIn 0.3s ease; }
+        .page.active { display: block; }
+        @keyframes pageIn {
+            from { opacity:0; transform: translateY(6px); }
+            to   { opacity:1; transform: translateY(0); }
+        }
+
+        .section-title {
+            font-family: var(--head);
+            font-size: 12px;
+            font-weight: 600;
+            letter-spacing: 5px;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            margin-bottom: 24px;
+            padding-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .section-title::before {
+            content: '//';
+            color: var(--cyan);
+            font-family: var(--mono);
+        }
+        .section-title::after {
+            content: '';
+            flex: 1;
+            height: 1px;
+            background: linear-gradient(90deg, var(--border2), transparent);
+        }
+
+        .card {
+            background: var(--bg1);
+            padding: 20px;
+            border: 1px solid var(--border);
+            transition: border-color 0.2s, box-shadow 0.2s;
+            position: relative;
+        }
+        .card::before, .card::after {
+            content: '';
+            position: absolute;
+            width: 10px; height: 10px;
+            border-color: var(--cyan-dim);
+            border-style: solid;
+            transition: border-color 0.2s;
+            pointer-events: none;
+        }
+        .card::before { top:0; left:0; border-width:1px 0 0 1px; }
+        .card::after  { bottom:0; right:0; border-width:0 1px 1px 0; }
+        .card:hover {
+            border-color: var(--border2);
+            box-shadow: 0 0 30px rgba(0,212,255,0.06);
+        }
+        .card:hover::before, .card:hover::after { border-color: var(--cyan); }
+        .card h3 {
+            font-family: var(--mono);
+            font-size: 11px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            color: var(--cyan);
+            margin-bottom: 16px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .full-width { grid-column: 1 / -1; }
+
+        .plot-container {
+            width: 100%;
+            height: 400px;
+            overflow: hidden;
+        }
+
+        .stats-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+        .stat-box {
+            background: var(--bg2);
+            padding: 16px;
+            border: 1px solid var(--border);
+            border-top: 2px solid var(--cyan-dim);
+            text-align: center;
+            position: relative;
+            transition: border-top-color 0.2s;
+        }
+        .stat-box:hover { border-top-color: var(--cyan); }
+        .stat-label {
+            font-family: var(--mono);
+            font-size: 9px;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            margin-bottom: 8px;
+        }
+        .stat-value {
+            font-family: var(--head);
+            font-size: 22px;
+            font-weight: 600;
+            color: var(--text-bright);
+        }
+        .stat-unit {
+            font-family: var(--mono);
+            font-size: 11px;
+            color: var(--cyan-dim);
+            margin-left: 4px;
+        }
+
+        .info-panel {
+            background: var(--bg2);
+            padding: 16px 20px;
+            border: 1px solid var(--border);
+            border-left: 2px solid var(--cyan-dim);
+            margin-bottom: 20px;
+        }
+        .info-panel h2 {
+            font-family: var(--mono);
+            font-size: 11px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            color: var(--cyan);
+            margin-bottom: 6px;
+        }
+        .info-panel p {
+            font-size: 14px;
+            color: var(--text-dim);
+            line-height: 1.6;
+        }
+
+        .summary-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 12px;
+            margin-bottom: 24px;
+        }
+        .summary-item {
+            background: var(--bg2);
+            padding: 14px 16px;
+            border: 1px solid var(--border);
+        }
+        .summary-item h4 {
+            font-family: var(--mono);
+            font-size: 9px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            color: var(--amber);
+            margin-bottom: 8px;
+        }
+        .summary-item p {
+            font-size: 13px;
+            color: var(--text);
+            margin: 4px 0;
+            line-height: 1.5;
+        }
+
+        .alert {
+            padding: 12px 16px;
+            margin-bottom: 16px;
+            border-left: 2px solid;
+            font-family: var(--mono);
+            font-size: 11px;
+            letter-spacing: 1px;
+        }
+        .alert-warning  { background: rgba(255,170,0,0.06); border-left-color: var(--amber);  color: var(--amber); }
+        .alert-success  { background: rgba(0,255,136,0.06); border-left-color: var(--green);  color: var(--green); }
+        .alert-danger   { background: rgba(255,34,68,0.06);  border-left-color: var(--red);    color: var(--red); }
+        .alert-info     { background: rgba(0,212,255,0.06);  border-left-color: var(--cyan);   color: var(--cyan); }
+
+        .no-data {
+            text-align: center;
+            padding: 60px 40px;
+            color: var(--text-dim);
+            background: var(--bg1);
+            border: 1px solid var(--border);
+            font-family: var(--mono);
+            font-size: 12px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+        }
+
+        footer {
+            text-align: center;
+            padding: 24px 20px;
+            color: var(--text-dim);
+            border-top: 1px solid var(--border);
+            margin-top: 40px;
+            font-family: var(--mono);
+            font-size: 10px;
+            letter-spacing: 2px;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="header-left">
+            <div class="header-logo">PXHK<span>.</span>ANALYZER</div>
+            <div class="header-divider"></div>
+            <div class="header-sub">Flight Log Intelligence System</div>
+        </div>
+        <div class="header-right">
+            <div class="header-status"><span class="status-dot"></span>SYSTEM ONLINE</div>
+        </div>
+    </header>
+
+    <div class="upload-section">
+        <div class="file-input-wrapper">
+            <label class="file-input-label" for="log-file">&#9654; LOAD LOG FILE</label>
+            <input type="file" id="log-file" accept=".bin,.log" />
+        </div>
+        <div class="upload-info" id="upload-status">AWAITING INPUT &mdash; .BIN / .LOG</div>
+    </div>
+
+    <nav>
+        <button class="nav-btn" onclick="showPage('overview')" disabled>Overview</button>
+        <button class="nav-btn" onclick="showPage('flightpath')" disabled>🗺️ Flight Path</button>
+        <button class="nav-btn" onclick="showPage('timeseries')" disabled>📈 Time Series</button>
+        <button class="nav-btn" onclick="showPage('imu')" disabled>IMU Analysis</button>
+        <button class="nav-btn" onclick="showPage('vibration')" disabled>Vibration</button>
+        <button class="nav-btn" onclick="showPage('attitude')" disabled>Attitude Control</button>
+        <button class="nav-btn" onclick="showPage('battery')" disabled>Battery Health</button>
+        <button class="nav-btn" onclick="showPage('motors')" disabled>Motor Performance</button>
+        <button class="nav-btn" onclick="showPage('pid')" disabled>PID Tuning</button>
+        <button class="nav-btn" onclick="showPage('gps')" disabled>GPS & Navigation</button>
+        <button class="nav-btn" onclick="showPage('barometer')" disabled>Barometer</button>
+        <button class="nav-btn" onclick="showPage('events')" disabled>Events</button>
+        <button class="nav-btn" onclick="showPage('magnetometer')" disabled>Magnetometer</button>
+    </nav>
+
+    <div class="container">
+        <!-- OVERVIEW PAGE -->
+        <div id="overview" class="page active">
+            <h2 class="section-title">Flight Summary</h2>
+            <div class="no-data">&#8679; LOAD A .BIN OR .LOG FILE TO INITIALIZE</div>
+        </div>
+
+        <!-- IMU ANALYSIS PAGE -->
+        <div id="imu" class="page">
+            <h2 class="section-title">IMU Analysis</h2>
+            <div class="info-panel">
+                <h2>📡 Inertial Measurement Unit</h2>
+                <p>Raw accelerometer and gyroscope readings. Excessive noise indicates vibration issues or mechanical problems.</p>
+            </div>
+            <div class="stats-container" id="imu-stats"></div>
+            <div class="dashboard-grid">
+                <div class="card full-width">
+                    <h3>Accelerometer Data (X, Y, Z)</h3>
+                    <div class="plot-container" id="imu-plot"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- VIBRATION PAGE -->
+        <div id="vibration" class="page">
+            <h2 class="section-title">Vibration Analysis</h2>
+            <div class="info-panel">
+                <h2>🔊 Frequency & Magnitude Analysis</h2>
+                <p>Vibration analysis via FFT frequency domain. Identifies propeller imbalance, bearing wear, or resonance.</p>
+            </div>
+            <div class="stats-container" id="vibration-stats"></div>
+            <div class="dashboard-grid">
+                <div class="card full-width">
+                    <h3>Vibration Magnitude Over Time</h3>
+                    <div class="plot-container" id="vibration-plot"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ATTITUDE CONTROL PAGE -->
+        <div id="attitude" class="page">
+            <h2 class="section-title">Attitude Control Analysis</h2>
+            <div class="info-panel">
+                <h2>✈️ Aircraft Attitude Tracking</h2>
+                <p>Desired vs actual roll, pitch, yaw. Errors indicate tuning issues or external disturbances.</p>
+            </div>
+            <div class="stats-container" id="attitude-stats"></div>
+            <div class="dashboard-grid">
+                <div class="card full-width">
+                    <h3>Roll, Pitch, Yaw Tracking (Desired vs Actual)</h3>
+                    <div class="plot-container" id="attitude-plot"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- BATTERY HEALTH PAGE -->
+        <div id="battery" class="page">
+            <h2 class="section-title">Battery Performance Analysis</h2>
+            <div class="info-panel">
+                <h2>🔋 Battery Management System</h2>
+                <p>Monitor voltage sag, current draw, and power consumption throughout the flight.</p>
+            </div>
+            <div class="stats-container" id="battery-stats"></div>
+            <div class="dashboard-grid">
+                <div class="card full-width">
+                    <h3>Voltage & Current Over Time</h3>
+                    <div class="plot-container" id="battery-plot"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- MOTOR PERFORMANCE PAGE -->
+        <div id="motors" class="page">
+            <h2 class="section-title">Motor Performance Analysis</h2>
+            <div class="info-panel">
+                <h2>⚡ Motor Output Balance & Efficiency</h2>
+                <p>Monitor motor output balance, sync, and correlation across all motors.</p>
+            </div>
+            <div class="stats-container" id="motors-stats"></div>
+            <div class="dashboard-grid">
+                <div class="card full-width">
+                    <h3>Motor Output Balance (All Motors)</h3>
+                    <div class="plot-container" id="motors-plot"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- PID TUNING PAGE -->
+        <div id="pid" class="page">
+            <h2 class="section-title">PID Controller Analysis</h2>
+            <div class="info-panel">
+                <h2>🎚️ PID Tuning & Rate Control</h2>
+                <p>Rate controller performance. Identify overshoot, lag, oscillation, or tuning drift.</p>
+            </div>
+            <div class="stats-container" id="pid-stats"></div>
+            <div class="dashboard-grid">
+                <div class="card full-width">
+                    <h3>Rate Controller Performance (Desired vs Actual)</h3>
+                    <div class="plot-container" id="pid-plot"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- GPS & NAVIGATION PAGE -->
+        <div id="gps" class="page">
+            <h2 class="section-title">GPS & Navigation</h2>
+            <div class="info-panel">
+                <h2>🛰️ Global Positioning System</h2>
+                <p>Satellite count, accuracy (HDOP/VDOP), altitude gain, and position tracking.</p>
+            </div>
+            <div class="stats-container" id="gps-stats"></div>
+            <div class="dashboard-grid">
+                <div class="card full-width">
+                    <h3>Altitude & Satellite Count</h3>
+                    <div class="plot-container" id="gps-plot"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- BAROMETER PAGE -->
+        <div id="barometer" class="page">
+            <h2 class="section-title">Barometer & Altitude Hold</h2>
+            <div class="info-panel">
+                <h2>📏 Pressure Altitude System</h2>
+                <p>Barometer readings and altitude stability during altitude hold mode.</p>
+            </div>
+            <div class="stats-container" id="barometer-stats"></div>
+            <div class="dashboard-grid">
+                <div class="card full-width">
+                    <h3>Altitude Over Time</h3>
+                    <div class="plot-container" id="barometer-plot"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- EVENTS PAGE -->
+        <div id="events" class="page">
+            <h2 class="section-title">Flight Events & Errors</h2>
+            <div class="info-panel">
+                <h2>📋 Flight Timeline</h2>
+                <p>Mode changes, errors, and failsafe events detected during flight.</p>
+            </div>
+            <div id="events-list" style="background: var(--bg1); border: 1px solid var(--border); padding: 16px;"></div>
+        </div>
+
+        <!-- MAGNETOMETER PAGE -->
+        <div id="magnetometer" class="page">
+            <h2 class="section-title">Magnetometer & Compass</h2>
+            <div class="info-panel">
+                <h2>🧭 Magnetic Field Analysis</h2>
+                <p>Compass health and electromagnetic interference detection.</p>
+            </div>
+            <div class="stats-container" id="magnetometer-stats"></div>
+            <div class="dashboard-grid">
+                <div class="card full-width">
+                    <h3>Magnetic Field Magnitude</h3>
+                    <div class="plot-container" id="magnetometer-plot"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- TIME SERIES PAGE -->
+        <div id="timeseries" class="page">
+            <h2 class="section-title">Time Series Explorer</h2>
+            <div style="display:flex;gap:0;height:calc(100vh - 220px);min-height:500px;">
+                <!-- LEFT: Signal Browser -->
+                <div id="ts-sidebar" style="width:240px;flex-shrink:0;background:var(--bg1);border:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;">
+                    <div style="padding:10px 12px;background:var(--bg2);border-bottom:1px solid var(--border);font-family:var(--mono);font-size:9px;letter-spacing:3px;color:var(--cyan);text-transform:uppercase;font-weight:700;">Signals</div>
+                    <div style="padding:8px;">
+                        <input id="ts-search" type="text" placeholder="Search signals..." oninput="tsFilterSignals(this.value)"
+                            style="width:100%;padding:6px 8px;background:var(--bg2);border:1px solid var(--border);color:var(--text-bright);font-family:var(--mono);font-size:11px;outline:none;box-sizing:border-box;">
+                    </div>
+                    <div id="ts-signal-list" style="flex:1;overflow-y:auto;padding:4px 8px 8px;"></div>
+                </div>
+
+                <!-- RIGHT: Plot panels area -->
+                <div style="flex:1;display:flex;flex-direction:column;border:1px solid #1c2a35;border-left:none;overflow:hidden;background:var(--bg);">
+                    <!-- Toolbar -->
+                    <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;background:#111922;border-bottom:1px solid #1c2a35;flex-shrink:0;">
+                        <button onclick="tsAddPanel()" style="font-size:11px;padding:5px 12px;background:transparent;border:1px solid var(--border2);color:var(--cyan);border-radius:3px;cursor:pointer;letter-spacing:1px;" title="Add a new plot panel">+ Panel</button>
+                        <button onclick="tsClearAll()" style="font-size:11px;padding:5px 12px;background:transparent;border:1px solid var(--border2);color:var(--red);border-radius:3px;cursor:pointer;letter-spacing:1px;" title="Clear all plots">Clear All</button>
+                        <div style="width:1px;height:20px;background:#1c2a35;margin:0 4px;"></div>
+                        <label style="font-size:11px;color:var(--text);font-family:var(--mono);display:flex;align-items:center;gap:5px;cursor:pointer;">
+                            <input type="checkbox" id="ts-sync" checked style="accent-color:#00e5ff;"> Sync Cursor
+                        </label>
+                    </div>
+
+                    <!-- Panels container -->
+                    <div id="ts-panels" style="flex:1;overflow-y:auto;padding:8px;display:flex;flex-direction:column;gap:8px;">
+                        <div id="ts-empty-hint" style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:14px;pointer-events:none;">
+                            <div style="font-size:40px;opacity:.08;">📈</div>
+                            <div style="font-family:var(--mono);font-size:10px;color:var(--text-dim);letter-spacing:3px;text-transform:uppercase;">Drag a signal here to start plotting</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- FLIGHT PATH PAGE -->
+        <div id="flightpath" class="page">
+            <h2 class="section-title">3D Flight Path Viewer</h2>
+            <div class="info-panel" style="margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;">
+                <div>
+                    <h2>🛸 GPS Flight Track</h2>
+                    <p>Interactive 3D visualization. Drag to rotate · Scroll to zoom · Shift+drag to pan.</p>
+                </div>
+                <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;">
+                    <label for="glb-input" style="display:inline-flex;align-items:center;gap:7px;padding:8px 14px;background:transparent;color:var(--cyan);border:1px solid var(--cyan-dim);cursor:pointer;font-family:var(--mono);font-size:10px;letter-spacing:2px;clip-path:polygon(8px 0%,100% 0%,calc(100% - 8px) 100%,0% 100%);">
+                        Load Drone Model (.glb)
+                        <input type="file" id="glb-input" accept=".glb" style="display:none;" onchange="fpLoadGLB(this)">
+                    </label>
+                    <span id="glb-status" style="font-size:12px;color:var(--text-dim);font-family:var(--mono);font-size:10px;">NO MODEL LOADED</span>
+                </div>
+            </div>
+
+            <div class="stats-container" id="fp-stats" style="margin-bottom:16px;"></div>
+
+            <div class="card full-width" style="padding:0;overflow:hidden;position:relative;height:620px;">
+                <canvas id="fpCanvas" style="display:block;width:100%;height:100%;"></canvas>
+                <div id="fpEmpty" style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;pointer-events:none;">
+                    <div style="font-size:48px;opacity:.2;">🛸</div>
+                    <div style="font-family:monospace;font-size:11px;color:#555;letter-spacing:3px;text-transform:uppercase;">No GPS data in this log</div>
+                </div>
+
+                <div style="position:absolute;top:12px;right:12px;display:flex;flex-direction:column;gap:6px;z-index:5;">
+                    <button onclick="fpCamTop()" style="font-family:monospace;font-size:10px;padding:5px 10px;border:1px solid var(--border2);background:rgba(2,5,8,.9);color:var(--cyan);cursor:pointer;letter-spacing:2px;">TOP</button>
+                    <button onclick="fpCamSide()" style="font-family:monospace;font-size:10px;padding:5px 10px;border:1px solid var(--border2);background:rgba(2,5,8,.9);color:var(--cyan);cursor:pointer;letter-spacing:2px;">SIDE</button>
+                    <button onclick="fpCamReset()" style="font-family:monospace;font-size:10px;padding:5px 10px;border:1px solid var(--border2);background:rgba(2,5,8,.9);color:var(--cyan);cursor:pointer;letter-spacing:2px;">RESET</button>
+                    <select id="fpColorMode" onchange="fpBuildScene()" style="font-family:monospace;font-size:10px;padding:4px 6px;border:1px solid var(--border2);background:rgba(2,5,8,.9);color:var(--text);outline:none;margin-top:4px;">
+                        <option value="altitude">Color: Alt</option>
+                        <option value="speed">Color: Speed</option>
+                        <option value="time">Color: Time</option>
+                    </select>
+                </div>
+
+                <div style="position:absolute;bottom:0;left:0;right:0;height:36px;background:rgba(2,5,8,.95);border-top:1px solid var(--border);display:flex;align-items:center;padding:0 14px;gap:10px;">
+                    <button id="fpPlayBtn" onclick="fpTogglePlay()" style="font-family:monospace;font-size:10px;padding:4px 12px;border:1px solid var(--cyan);background:rgba(0,212,255,.06);color:var(--cyan);cursor:pointer;border-radius:2px;letter-spacing:2px;flex-shrink:0;">▶ PLAY</button>
+                    <div id="fpTimeline" onclick="fpTimelineClick(event)" style="flex:1;height:3px;background:var(--border);cursor:pointer;position:relative;">
+                        <div id="fpFill" style="height:100%;background:linear-gradient(to right,var(--cyan-dim),var(--cyan));border-radius:2px;width:0%;"></div>
+                        <div id="fpThumb" style="position:absolute;top:50%;transform:translate(-50%,-50%);width:10px;height:10px;background:var(--cyan);border-radius:50%;left:0%;pointer-events:none;"></div>
+                    </div>
+                    <span id="fpTimeLabel" style="font-family:monospace;font-size:10px;color:var(--text);flex-shrink:0;min-width:40px;text-align:right;">0:00</span>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <footer>&copy; 2026 &mdash; PXHK.ANALYZER &mdash; DRONE FLIGHT INTELLIGENCE</footer>
+
+    <script>
+        const API_URL = 'http://localhost:5001/api';
+        let currentData = null;
+        let currentSummary = null;
+
+        // File upload handler
+        document.getElementById('log-file').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const statusEl = document.getElementById('upload-status');
+            statusEl.textContent = `📤 Uploading ${file.name}...`;
+            statusEl.classList.add('loading');
+
+            const rawBuf = await file.arrayBuffer();
+            const formData = new FormData();
+            formData.append('file', file);
+
+            try {
+                const response = await fetch(`${API_URL}/upload`, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!response.ok) throw new Error(`Upload failed: ${response.status}`);
+
+                const data = await response.json();
+                if (!data.success) throw new Error(data.error || 'Upload failed');
+
+                currentData = data.analyses;
+                currentSummary = data.summary;
+
+                statusEl.textContent = `✓ Loaded: ${file.name}`;
+                statusEl.classList.remove('loading');
+
+                // Enable nav buttons
+                document.querySelectorAll('.nav-btn').forEach(btn => btn.disabled = false);
+
+                // Parse GPS client-side
+                fpLoadBuffer(rawBuf, file.name);
+
+                // Show overview
+                showOverviewPage();
+            } catch (error) {
+                statusEl.textContent = `✗ Error: ${error.message}`;
+                statusEl.classList.remove('loading');
+                alert(`Upload error: ${error.message}`);
+            }
+        });
+
+        // Page navigation
+        function showPage(pageId) {
+            if (!currentData) {
+                alert('Please upload a log file first');
+                return;
+            }
+
+            document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.nav-btn').forEach(btn => btn.classList.remove('active'));
+
+            document.getElementById(pageId).classList.add('active');
+            event.target.classList.add('active');
+
+            // Generate plots
+            if (pageId === 'overview') showOverviewPage();
+            else if (pageId === 'imu') generateIMUPlot();
+            else if (pageId === 'vibration') generateVibrationPlot();
+            else if (pageId === 'attitude') generateAttitudePlot();
+            else if (pageId === 'battery') generateBatteryPlot();
+            else if (pageId === 'motors') generateMotorsPlot();
+            else if (pageId === 'pid') generatePIDPlot();
+            else if (pageId === 'gps') generateGPSPlot();
+            else if (pageId === 'barometer') generateBarometerPlot();
+            else if (pageId === 'events') generateEventsPage();
+            else if (pageId === 'magnetometer') generateMagnetometerPlot();
+            else if (pageId === 'timeseries') tsInit();
+        }
+
+        // Overview page
+        function showOverviewPage() {
+            const overview = document.getElementById('overview');
+            if (!currentSummary) return;
+
+            const summary = currentSummary;
+            const scoreColor = summary.flight_quality_score >= 80 ? '#4caf50' :
+                             summary.flight_quality_score >= 60 ? '#FFD93D' : '#ff2244';
+
+            overview.innerHTML = `
+                <h2 class="section-title">Flight Summary</h2>
+
+                <div class="info-panel">
+                    <h2>📊 Flight Overview</h2>
+                    <p>Analysis completed: ${new Date(summary.timestamp).toLocaleString()}</p>
+                </div>
+
+                ${summary.issues.length > 0 ? `<div class="alert alert-${summary.flight_quality_score >= 80 ? 'success' : 'warning'}">
+                    <strong>Issues Detected:</strong> ${summary.issues.join(', ')}
+                </div>` : ''}
+
+                <div class="card full-width" style="text-align: center; padding: 40px;">
+                    <h3>Flight Quality Score</h3>
+                    <div style="font-size: 64px; color: ${scoreColor}; font-weight: bold; margin: 20px 0;">
+                        ${summary.flight_quality_score}/100
+                    </div>
+                    <div style="font-size: 24px; color: var(--text); margin-bottom: 20px;">
+                        ${summary.verdict}
+                    </div>
+                    <p style="color: var(--text-dim);">${getVerdictDescription(summary.verdict)}</p>
+                </div>
+
+                <h3 class="section-title">Messages Loaded</h3>
+                <div class="summary-grid">
+                    ${Object.entries(summary.messages_loaded).map(([msg, count]) => `
+                        <div class="summary-item">
+                            <h4>${msg}</h4>
+                            <p>${count} records</p>
+                        </div>
+                    `).join('')}
+                </div>
+
+                <h3 class="section-title">Frame Configuration</h3>
+                <div class="summary-grid">
+                    <div class="summary-item">
+                        <h4>Frame Type</h4>
+                        <p>${summary.frame.name}</p>
+                    </div>
+                    <div class="summary-item">
+                        <h4>Motor Count</h4>
+                        <p>${summary.frame.motor_count}</p>
+                    </div>
+                    <div class="summary-item">
+                        <h4>Frame Layout</h4>
+                        <p>${summary.frame.layout}</p>
+                    </div>
+                    <div class="summary-item">
+                        <h4>Detection Source</h4>
+                        <p>${summary.frame.source}</p>
+                    </div>
+                </div>
+            `;
+        }
+
+        function getVerdictDescription(verdict) {
+            const descriptions = {
+                'Excellent': 'Outstanding flight with minimal issues. No action needed.',
+                'Good': 'Good flight performance. Minor tuning opportunities available.',
+                'Fair': 'Acceptable performance but review logs for potential improvements.',
+                'Poor': 'Multiple issues detected. Recommend parameter review and testing.',
+                'Critical': 'Significant problems found. Do not fly until resolved.',
+            };
+            return descriptions[verdict] || 'Analysis complete.';
+        }
+
+        // Plot generators
+        function generateIMUPlot() {
+            if (!currentData.imu || !currentData.imu.timestamps) return;
+
+            const imu = currentData.imu;
+            const traces = [
+                {x: imu.timestamps, y: imu.accX, name: 'AccX', line: {color: '#FF6B6B'}},
+                {x: imu.timestamps, y: imu.accY, name: 'AccY', line: {color: '#4ECDC4'}},
+                {x: imu.timestamps, y: imu.accZ, name: 'AccZ', line: {color: '#45B7D1'}},
+            ];
+
+            const layout = {
+                title: '',
+                xaxis: {title: 'TIME (µs)', color: '#4a6070', gridcolor: '#0e2233', zeroline: false},
+                yaxis: {title: 'Acceleration (m/s²)', color: '#4a6070'},
+                hovermode: 'x unified',
+                plot_bgcolor: '#020508',
+                paper_bgcolor: '#060d12',
+                font: {color: '#b8cdd6', family: 'Share Tech Mono'},
+                margin: {l: 60, r: 20, t: 20, b: 60}
+            };
+
+            Plotly.newPlot('imu-plot', traces, layout, {responsive: true});
+
+            if (imu.stats) {
+                const statsHtml = `
+                    <div class="stat-box">
+                        <div class="stat-label">Max AccX</div>
+                        <div class="stat-value">${imu.stats.accX_max.toFixed(2)}<span class="stat-unit">m/s²</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Max AccY</div>
+                        <div class="stat-value">${imu.stats.accY_max.toFixed(2)}<span class="stat-unit">m/s²</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Max AccZ</div>
+                        <div class="stat-value">${imu.stats.accZ_max.toFixed(2)}<span class="stat-unit">m/s²</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">AccX RMS</div>
+                        <div class="stat-value">${imu.stats.accX_rms.toFixed(2)}<span class="stat-unit">m/s²</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">AccY RMS</div>
+                        <div class="stat-value">${imu.stats.accY_rms.toFixed(2)}<span class="stat-unit">m/s²</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">AccZ RMS</div>
+                        <div class="stat-value">${imu.stats.accZ_rms.toFixed(2)}<span class="stat-unit">m/s²</span></div>
+                    </div>
+                `;
+                document.getElementById('imu-stats').innerHTML = statsHtml;
+            }
+        }
+
+        function generateVibrationPlot() {
+            if (!currentData.vibration || !currentData.vibration.timestamps) return;
+
+            const vib = currentData.vibration;
+            const traces = [{
+                x: vib.timestamps,
+                y: vib.vibration_magnitude,
+                name: 'Vibration Magnitude',
+                fill: 'tozeroy',
+                line: {color: '#FF6B6B'},
+                fillcolor: 'rgba(255, 107, 107, 0.2)'
+            }];
+
+            const layout = {
+                title: '',
+                xaxis: {title: 'TIME (µs)', color: '#4a6070', gridcolor: '#0e2233', zeroline: false},
+                yaxis: {title: 'Magnitude (m/s²)', color: '#4a6070'},
+                hovermode: 'x unified',
+                plot_bgcolor: '#020508',
+                paper_bgcolor: '#060d12',
+                font: {color: '#b8cdd6', family: 'Share Tech Mono'},
+                margin: {l: 60, r: 20, t: 20, b: 60}
+            };
+
+            Plotly.newPlot('vibration-plot', traces, layout, {responsive: true});
+
+            if (vib.stats) {
+                const statsHtml = `
+                    <div class="stat-box">
+                        <div class="stat-label">Vibration Max</div>
+                        <div class="stat-value">${vib.stats.vibration_max.toFixed(2)}<span class="stat-unit">m/s²</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Vibration Mean</div>
+                        <div class="stat-value">${vib.stats.vibration_mean.toFixed(2)}<span class="stat-unit">m/s²</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Vibration RMS</div>
+                        <div class="stat-value">${vib.stats.vibration_rms.toFixed(2)}<span class="stat-unit">m/s²</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Dominant Freq X</div>
+                        <div class="stat-value">${vib.stats.dominant_freq_x.toFixed(0)}<span class="stat-unit">bin</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Dominant Freq Y</div>
+                        <div class="stat-value">${vib.stats.dominant_freq_y.toFixed(0)}<span class="stat-unit">bin</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Dominant Freq Z</div>
+                        <div class="stat-value">${vib.stats.dominant_freq_z.toFixed(0)}<span class="stat-unit">bin</span></div>
+                    </div>
+                `;
+                document.getElementById('vibration-stats').innerHTML = statsHtml;
+            }
+        }
+
+        function generateAttitudePlot() {
+            if (!currentData.attitude || !currentData.attitude.timestamps) return;
+
+            const att = currentData.attitude;
+            const traces = [
+                {x: att.timestamps, y: att.desRoll, name: 'Desired Roll', line: {color: '#FFD93D', dash: 'dash'}},
+                {x: att.timestamps, y: att.roll, name: 'Actual Roll', line: {color: '#6BCB77'}},
+                {x: att.timestamps, y: att.desPitch, name: 'Desired Pitch', line: {color: '#FFD93D', dash: 'dash'}},
+                {x: att.timestamps, y: att.pitch, name: 'Actual Pitch', line: {color: '#4ECDC4'}},
+            ];
+
+            const layout = {
+                title: '',
+                xaxis: {title: 'TIME (µs)', color: '#4a6070', gridcolor: '#0e2233', zeroline: false},
+                yaxis: {title: 'Angle (degrees)', color: '#4a6070'},
+                hovermode: 'x unified',
+                plot_bgcolor: '#020508',
+                paper_bgcolor: '#060d12',
+                font: {color: '#b8cdd6', family: 'Share Tech Mono'},
+                margin: {l: 60, r: 20, t: 20, b: 60}
+            };
+
+            Plotly.newPlot('attitude-plot', traces, layout, {responsive: true});
+
+            if (att.stats) {
+                const statsHtml = `
+                    <div class="stat-box">
+                        <div class="stat-label">Roll Error RMS</div>
+                        <div class="stat-value">${att.stats.roll_error_rms.toFixed(2)}<span class="stat-unit">°</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Pitch Error RMS</div>
+                        <div class="stat-value">${att.stats.pitch_error_rms.toFixed(2)}<span class="stat-unit">°</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Yaw Error RMS</div>
+                        <div class="stat-value">${att.stats.yaw_error_rms.toFixed(2)}<span class="stat-unit">°</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Roll Error Max</div>
+                        <div class="stat-value">${att.stats.roll_error_max.toFixed(2)}<span class="stat-unit">°</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Pitch Error Max</div>
+                        <div class="stat-value">${att.stats.pitch_error_max.toFixed(2)}<span class="stat-unit">°</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Yaw Error Max</div>
+                        <div class="stat-value">${att.stats.yaw_error_max.toFixed(2)}<span class="stat-unit">°</span></div>
+                    </div>
+                `;
+                document.getElementById('attitude-stats').innerHTML = statsHtml;
+            }
+        }
+
+        function generateBatteryPlot() {
+            if (!currentData.battery || !currentData.battery.timestamps) return;
+
+            const bat = currentData.battery;
+            const traces = [
+                {x: bat.timestamps, y: bat.voltage, name: 'Voltage (V)', yaxis: 'y1', line: {color: '#FFD93D'}},
+                {x: bat.timestamps, y: bat.current, name: 'Current (A)', yaxis: 'y2', line: {color: '#6BCB77'}},
+            ];
+
+            const layout = {
+                title: '',
+                xaxis: {title: 'TIME (µs)', color: '#4a6070', gridcolor: '#0e2233', zeroline: false},
+                yaxis: {title: 'Voltage (V)', color: '#FFD93D'},
+                yaxis2: {title: 'Current (A)', color: '#6BCB77', overlaying: 'y', side: 'right'},
+                hovermode: 'x unified',
+                plot_bgcolor: '#020508',
+                paper_bgcolor: '#060d12',
+                font: {color: '#b8cdd6', family: 'Share Tech Mono'},
+                margin: {l: 60, r: 60, t: 20, b: 60}
+            };
+
+            Plotly.newPlot('battery-plot', traces, layout, {responsive: true});
+
+            if (bat.stats) {
+                const statsHtml = `
+                    <div class="stat-box">
+                        <div class="stat-label">Min Voltage</div>
+                        <div class="stat-value">${bat.stats.voltage_min.toFixed(2)}<span class="stat-unit">V</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Max Voltage</div>
+                        <div class="stat-value">${bat.stats.voltage_max.toFixed(2)}<span class="stat-unit">V</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Voltage Sag</div>
+                        <div class="stat-value">${bat.stats.voltage_sag.toFixed(2)}<span class="stat-unit">V</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Max Current</div>
+                        <div class="stat-value">${bat.stats.current_max.toFixed(2)}<span class="stat-unit">A</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Peak Power</div>
+                        <div class="stat-value">${bat.stats.power_max.toFixed(0)}<span class="stat-unit">W</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Avg Power</div>
+                        <div class="stat-value">${bat.stats.power_avg.toFixed(0)}<span class="stat-unit">W</span></div>
+                    </div>
+                `;
+                document.getElementById('battery-stats').innerHTML = statsHtml;
+            }
+        }
+
+        function generateMotorsPlot() {
+            if (!currentData.motors || !currentData.motors.timestamps) return;
+
+            const mot = currentData.motors;
+            const colors = ['#FF6B6B','#4ECDC4','#45B7D1','#FFD93D','#FF8B94','#A8E6CF',
+                            '#FF9F43','#a29bfe','#fd79a8','#74b9ff','#55efc4','#e17055'];
+            const traces = [];
+
+            for (let i = 1; i <= mot.motor_count; i++) {
+                const key = `motor${i}`;
+                if (mot[key]) {
+                    traces.push({
+                        x: mot.timestamps,
+                        y: mot[key],
+                        name: `Motor ${i}`,
+                        line: {color: colors[(i - 1) % colors.length]}
+                    });
+                }
+            }
+
+            const layout = {
+                title: '',
+                xaxis: {title: 'TIME (µs)', color: '#4a6070', gridcolor: '#0e2233', zeroline: false},
+                yaxis: {title: 'Output (µs)', color: '#4a6070'},
+                hovermode: 'x unified',
+                plot_bgcolor: '#020508',
+                paper_bgcolor: '#060d12',
+                font: {color: '#b8cdd6', family: 'Share Tech Mono'},
+                margin: {l: 60, r: 20, t: 20, b: 60}
+            };
+
+            Plotly.newPlot('motors-plot', traces, layout, {responsive: true});
+
+            if (mot.stats) {
+                const statsHtml = `
+                    <div class="stat-box">
+                        <div class="stat-label">Motor Count</div>
+                        <div class="stat-value">${mot.stats.motor_count}</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Imbalance %</div>
+                        <div class="stat-value">${mot.stats.imbalance_pct.toFixed(2)}<span class="stat-unit">%</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Sync Error</div>
+                        <div class="stat-value">${mot.stats.sync_error.toFixed(2)}<span class="stat-unit">µs</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Correlation</div>
+                        <div class="stat-value">${mot.stats.motor_correlation.toFixed(3)}</div>
+                    </div>
+                `;
+                document.getElementById('motors-stats').innerHTML = statsHtml;
+            }
+        }
+
+        function generatePIDPlot() {
+            if (!currentData.pid || !currentData.pid.timestamps) return;
+
+            const pid = currentData.pid;
+            const traces = [
+                {x: pid.timestamps, y: pid.desRoll, name: 'Desired Roll Rate', line: {color: '#FFD93D', dash: 'dash'}},
+                {x: pid.timestamps, y: pid.roll, name: 'Actual Roll Rate', line: {color: '#6BCB77'}},
+            ];
+
+            const layout = {
+                title: '',
+                xaxis: {title: 'TIME (µs)', color: '#4a6070', gridcolor: '#0e2233', zeroline: false},
+                yaxis: {title: 'Rate (deg/s)', color: '#4a6070'},
+                hovermode: 'x unified',
+                plot_bgcolor: '#020508',
+                paper_bgcolor: '#060d12',
+                font: {color: '#b8cdd6', family: 'Share Tech Mono'},
+                margin: {l: 60, r: 20, t: 20, b: 60}
+            };
+
+            Plotly.newPlot('pid-plot', traces, layout, {responsive: true});
+
+            if (pid.stats) {
+                const statsHtml = `
+                    <div class="stat-box">
+                        <div class="stat-label">Roll Rate Error RMS</div>
+                        <div class="stat-value">${pid.stats.roll_rate_error_rms.toFixed(2)}<span class="stat-unit">°/s</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Pitch Rate Error RMS</div>
+                        <div class="stat-value">${pid.stats.pitch_rate_error_rms.toFixed(2)}<span class="stat-unit">°/s</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Yaw Rate Error RMS</div>
+                        <div class="stat-value">${pid.stats.yaw_rate_error_rms.toFixed(2)}<span class="stat-unit">°/s</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Roll Rate Error Max</div>
+                        <div class="stat-value">${pid.stats.roll_rate_error_max.toFixed(2)}<span class="stat-unit">°/s</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Pitch Rate Error Max</div>
+                        <div class="stat-value">${pid.stats.pitch_rate_error_max.toFixed(2)}<span class="stat-unit">°/s</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Yaw Rate Error Max</div>
+                        <div class="stat-value">${pid.stats.yaw_rate_error_max.toFixed(2)}<span class="stat-unit">°/s</span></div>
+                    </div>
+                `;
+                document.getElementById('pid-stats').innerHTML = statsHtml;
+            }
+        }
+
+        function generateGPSPlot() {
+            if (!currentData.gps || !currentData.gps.timestamps) return;
+
+            const gps = currentData.gps;
+            const traces = [];
+
+            if (gps.altitude) {
+                traces.push({
+                    x: gps.timestamps,
+                    y: gps.altitude,
+                    name: 'Altitude',
+                    yaxis: 'y1',
+                    line: {color: '#FFD93D'}
+                });
+            }
+
+            if (gps.num_satellites) {
+                traces.push({
+                    x: gps.timestamps,
+                    y: gps.num_satellites,
+                    name: 'Satellites',
+                    yaxis: 'y2',
+                    line: {color: '#6BCB77'}
+                });
+            }
+
+            const layout = {
+                title: '',
+                xaxis: {title: 'TIME (µs)', color: '#4a6070', gridcolor: '#0e2233', zeroline: false},
+                yaxis: {title: 'Altitude (m)', color: '#FFD93D'},
+                yaxis2: {title: 'Satellites', color: '#6BCB77', overlaying: 'y', side: 'right'},
+                hovermode: 'x unified',
+                plot_bgcolor: '#020508',
+                paper_bgcolor: '#060d12',
+                font: {color: '#b8cdd6', family: 'Share Tech Mono'},
+                margin: {l: 60, r: 60, t: 20, b: 60}
+            };
+
+            Plotly.newPlot('gps-plot', traces, layout, {responsive: true});
+
+            if (gps.stats) {
+                const statsHtml = `
+                    <div class="stat-box">
+                        <div class="stat-label">Min Altitude</div>
+                        <div class="stat-value">${gps.stats.alt_min.toFixed(1)}<span class="stat-unit">m</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Max Altitude</div>
+                        <div class="stat-value">${gps.stats.alt_max.toFixed(1)}<span class="stat-unit">m</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Altitude Gain</div>
+                        <div class="stat-value">${gps.stats.alt_gain.toFixed(1)}<span class="stat-unit">m</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Avg Satellites</div>
+                        <div class="stat-value">${gps.stats.avg_satellites.toFixed(1)}</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Min Satellites</div>
+                        <div class="stat-value">${gps.stats.min_satellites}</div>
+                    </div>
+                `;
+                document.getElementById('gps-stats').innerHTML = statsHtml;
+            }
+        }
+
+        function generateBarometerPlot() {
+            if (!currentData.barometer || !currentData.barometer.timestamps) return;
+
+            const baro = currentData.barometer;
+            const traces = [{
+                x: baro.timestamps,
+                y: baro.altitude,
+                name: 'Altitude',
+                line: {color: '#45B7D1'},
+                fill: 'tozeroy',
+                fillcolor: 'rgba(69, 183, 209, 0.2)'
+            }];
+
+            const layout = {
+                title: '',
+                xaxis: {title: 'TIME (µs)', color: '#4a6070', gridcolor: '#0e2233', zeroline: false},
+                yaxis: {title: 'Altitude (m)', color: '#4a6070'},
+                hovermode: 'x unified',
+                plot_bgcolor: '#020508',
+                paper_bgcolor: '#060d12',
+                font: {color: '#b8cdd6', family: 'Share Tech Mono'},
+                margin: {l: 60, r: 20, t: 20, b: 60}
+            };
+
+            Plotly.newPlot('barometer-plot', traces, layout, {responsive: true});
+
+            if (baro.stats) {
+                const statsHtml = `
+                    <div class="stat-box">
+                        <div class="stat-label">Min Alt</div>
+                        <div class="stat-value">${baro.stats.alt_min.toFixed(1)}<span class="stat-unit">m</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Max Alt</div>
+                        <div class="stat-value">${baro.stats.alt_max.toFixed(1)}<span class="stat-unit">m</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Mean Alt</div>
+                        <div class="stat-value">${baro.stats.alt_mean.toFixed(1)}<span class="stat-unit">m</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Alt StdDev</div>
+                        <div class="stat-value">${baro.stats.alt_std.toFixed(2)}<span class="stat-unit">m</span></div>
+                    </div>
+                `;
+                document.getElementById('barometer-stats').innerHTML = statsHtml;
+            }
+        }
+
+        function generateEventsPage() {
+            if (!currentData.events) return;
+
+            const events = currentData.events;
+            const eventsList = document.getElementById('events-list');
+
+            if (events.events.length === 0) {
+                eventsList.innerHTML = '<p style="color: var(--text-dim); padding: 16px;">No events detected during flight.</p>';
+                return;
+            }
+
+            eventsList.innerHTML = events.events.map((evt, idx) => `
+                <div style="padding: 12px 16px; border-bottom: 1px solid var(--border); ${idx % 2 === 0 ? 'background: rgba(0,0,0,0.2);' : ''}">
+                    <div style="display: flex; justify-content: space-between; align-items: center; gap: 16px;">
+                        <div>
+                            <strong style="color: var(--cyan);">${evt.type}</strong>
+                            ${evt.value ? `<span style="color: var(--text-dim); margin-left: 8px;">= ${evt.value}</span>` : ''}
+                            ${evt.message ? `<span style="color: var(--text-dim); margin-left: 8px;">${evt.message}</span>` : ''}
+                            ${evt.error_code ? `<span style="color: var(--amber); margin-left: 8px;">Code: ${evt.error_code}</span>` : ''}
+                        </div>
+                        <div style="font-family: var(--mono); font-size: 10px; color: var(--text-dim);">
+                            ${(evt.timestamp / 1e6).toFixed(2)}s
+                        </div>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function generateMagnetometerPlot() {
+            if (!currentData.magnetometer || !currentData.magnetometer.timestamps) return;
+
+            const mag = currentData.magnetometer;
+            const traces = [{
+                x: mag.timestamps,
+                y: mag.magnitude,
+                name: 'Field Magnitude',
+                line: {color: '#FF8B94'},
+                fill: 'tozeroy',
+                fillcolor: 'rgba(255, 139, 148, 0.2)'
+            }];
+
+            const layout = {
+                title: '',
+                xaxis: {title: 'TIME (µs)', color: '#4a6070', gridcolor: '#0e2233', zeroline: false},
+                yaxis: {title: 'Magnitude (mGauss)', color: '#4a6070'},
+                hovermode: 'x unified',
+                plot_bgcolor: '#020508',
+                paper_bgcolor: '#060d12',
+                font: {color: '#b8cdd6', family: 'Share Tech Mono'},
+                margin: {l: 60, r: 20, t: 20, b: 60}
+            };
+
+            Plotly.newPlot('magnetometer-plot', traces, layout, {responsive: true});
+
+            if (mag.stats) {
+                const statsHtml = `
+                    <div class="stat-box">
+                        <div class="stat-label">Mag X Mean</div>
+                        <div class="stat-value">${mag.stats.magx_mean.toFixed(1)}<span class="stat-unit">mG</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Mag Y Mean</div>
+                        <div class="stat-value">${mag.stats.magy_mean.toFixed(1)}<span class="stat-unit">mG</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Mag Z Mean</div>
+                        <div class="stat-value">${mag.stats.magz_mean.toFixed(1)}<span class="stat-unit">mG</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Field Magnitude</div>
+                        <div class="stat-value">${mag.stats.magnitude_mean.toFixed(1)}<span class="stat-unit">mG</span></div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-label">Interference</div>
+                        <div class="stat-value">${mag.stats.interference_level}</div>
+                    </div>
+                `;
+                document.getElementById('magnetometer-stats').innerHTML = statsHtml;
+            }
+        }
+    </script>
+
+    <!-- TIME SERIES EXPLORER SCRIPT -->
+    <script>
+        let tsSignals = {};
+        let tsPanels = [];
+        let tsPanelSeq = 0;
+        let tsInited = false;
+
+        function tsBuildSignals() {
+            tsSignals = {};
+            if (!currentData) return;
+
+            function add(group, field, t, y, unit='') {
+                if (!t || !y || t.length === 0) return;
+                tsSignals[`${group}/${field}`] = { t, y, unit, group, field };
+            }
+
+            const d = currentData;
+
+            if (d.imu && d.imu.timestamps) {
+                const t = d.imu.timestamps;
+                add('IMU','AccX',t,d.imu.accX,'m/s²');
+                add('IMU','AccY',t,d.imu.accY,'m/s²');
+                add('IMU','AccZ',t,d.imu.accZ,'m/s²');
+                if (d.imu.gyrX) { add('IMU','GyrX',t,d.imu.gyrX,'rad/s'); add('IMU','GyrY',t,d.imu.gyrY,'rad/s'); add('IMU','GyrZ',t,d.imu.gyrZ,'rad/s'); }
+            }
+            if (d.attitude && d.attitude.timestamps) {
+                const t = d.attitude.timestamps;
+                add('Attitude','Roll',    t, d.attitude.roll,    '°');
+                add('Attitude','Pitch',   t, d.attitude.pitch,   '°');
+                add('Attitude','Yaw',     t, d.attitude.yaw,     '°');
+                add('Attitude','DesRoll', t, d.attitude.desRoll, '°');
+                add('Attitude','DesPitch',t, d.attitude.desPitch,'°');
+                add('Attitude','DesYaw',  t, d.attitude.desYaw,  '°');
+            }
+            if (d.battery && d.battery.timestamps) {
+                const t = d.battery.timestamps;
+                add('Battery','Voltage',t,d.battery.voltage,'V');
+                add('Battery','Current',t,d.battery.current,'A');
+            }
+            if (d.motors && d.motors.timestamps) {
+                const t = d.motors.timestamps;
+                const count = d.motors.motor_count || 0;
+                for (let i = 1; i <= count; i++) {
+                    const key = `motor${i}`;
+                    if (d.motors[key]) add('Motors', `Motor${i}`, t, d.motors[key], 'µs');
+                }
+            }
+            if (d.pid && d.pid.timestamps) {
+                const t = d.pid.timestamps;
+                add('PID','DesRoll',t,d.pid.desRoll,'°/s');
+                add('PID','Roll',t,d.pid.roll,'°/s');
+                add('PID','DesPitch',t,d.pid.desPitch,'°/s');
+                add('PID','Pitch',t,d.pid.pitch,'°/s');
+            }
+        }
+
+        function tsRenderTree(filter='') {
+            const list = document.getElementById('ts-signal-list');
+            if (!list) return;
+            const groups = {};
+            for (const [key, sig] of Object.entries(tsSignals)) {
+                if (filter && !key.toLowerCase().includes(filter.toLowerCase())) continue;
+                if (!groups[sig.group]) groups[sig.group] = [];
+                groups[sig.group].push({ key, sig });
+            }
+            list.innerHTML = '';
+            for (const [group, items] of Object.entries(groups)) {
+                const hdr = document.createElement('div');
+                hdr.textContent = group;
+                hdr.style.cssText = 'font-size:10px;color:var(--cyan-dim);letter-spacing:2px;text-transform:uppercase;padding:8px 4px 3px;font-weight:700;font-family:var(--mono);';
+                list.appendChild(hdr);
+                for (const { key, sig } of items) {
+                    const row = document.createElement('div');
+                    row.draggable = true;
+                    row.dataset.sigkey = key;
+                    row.innerHTML = `<span style="color:#00e5ff;font-size:11px;">${sig.field}</span>` +
+                        (sig.unit ? `<span style="color:#3a5260;font-size:10px;margin-left:5px;">${sig.unit}</span>` : '');
+                    row.style.cssText = 'padding:5px 8px;border-radius:3px;cursor:grab;display:flex;align-items:center;justify-content:space-between;transition:background .15s;user-select:none;';
+                    row.addEventListener('mouseenter', () => row.style.background='rgba(0,212,255,0.05)');
+                    row.addEventListener('mouseleave', () => row.style.background='');
+                    row.addEventListener('dragstart', e => {
+                        e.dataTransfer.setData('text/sigkey', key);
+                        row.style.opacity='0.5';
+                    });
+                    row.addEventListener('dragend', () => row.style.opacity='1');
+                    list.appendChild(row);
+                }
+            }
+            if (list.children.length === 0) list.innerHTML = '<div style="color:var(--text-dim);font-size:11px;font-family:var(--mono);padding:12px 4px;">No signals match</div>';
+        }
+
+        function tsFilterSignals(val) { tsRenderTree(val); }
+
+        const TS_COLORS = ['#00e5ff','#ff6b6b','#FFD93D','#6BCB77','#ff9f43','#a29bfe','#fd79a8','#74b9ff','#55efc4','#e17055'];
+
+        function tsAddPanel(sigKey) {
+            document.getElementById('ts-empty-hint').style.display = 'none';
+            const id = 'ts-panel-' + (++tsPanelSeq);
+
+            const wrap = document.createElement('div');
+            wrap.id = id + '-wrap';
+            wrap.style.cssText = 'background:var(--bg1);border:1px solid var(--border);flex-shrink:0;position:relative;height:220px;display:flex;flex-direction:column;';
+
+            const bar = document.createElement('div');
+            bar.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 10px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;';
+            bar.innerHTML = `
+                <span style="color:var(--text-dim);letter-spacing:1px;font-family:var(--mono);font-size:10px;">PANEL ${tsPanelSeq}</span>
+                <div style="flex:1;"></div>
+                <button onclick="tsResizePanel('${id}', -60)" style="background:none;border:none;color:#4a7a8a;cursor:pointer;font-size:14px;padding:0 4px;">−</button>
+                <button onclick="tsResizePanel('${id}', 60)" style="background:none;border:none;color:#4a7a8a;cursor:pointer;font-size:14px;padding:0 4px;">+</button>
+                <button onclick="tsRemovePanel('${id}')" style="background:none;border:none;color:#ff6b6b;cursor:pointer;font-size:13px;padding:0 4px;">✕</button>`;
+            wrap.appendChild(bar);
+
+            const plotDiv = document.createElement('div');
+            plotDiv.id = id;
+            plotDiv.style.cssText = 'flex:1;min-height:0;';
+            wrap.appendChild(plotDiv);
+
+            wrap.addEventListener('dragover', e => { e.preventDefault(); wrap.style.borderColor='#00e5ff'; });
+            wrap.addEventListener('dragleave', () => wrap.style.borderColor='#1c2a35');
+            wrap.addEventListener('drop', e => {
+                e.preventDefault();
+                wrap.style.borderColor='#1c2a35';
+                const key = e.dataTransfer.getData('text/sigkey');
+                if (key) tsAddTrace(id, key);
+            });
+
+            document.getElementById('ts-panels').appendChild(wrap);
+
+            Plotly.newPlot(id, [], {
+                margin:{l:50,r:10,t:10,b:35},
+                plot_bgcolor:'#020508', paper_bgcolor:'#060d12',
+                font:{color:'#b8cdd6',size:10,family:'Share Tech Mono'},
+                xaxis:{color:'#4a6070',gridcolor:'#0e2233',zeroline:false},
+                yaxis:{color:'#4a6070',gridcolor:'#0e2233',zeroline:false},
+                hovermode:'x unified',
+            }, {responsive:true, displayModeBar:false});
+
+            tsPanels.push({ id, traces: [] });
+
+            if (sigKey) tsAddTrace(id, sigKey);
+        }
+
+        function tsAddTrace(panelId, sigKey) {
+            const sig = tsSignals[sigKey];
+            if (!sig) return;
+            const panel = tsPanels.find(p => p.id === panelId);
+            if (!panel) return;
+            if (panel.traces.includes(sigKey)) return;
+            panel.traces.push(sigKey);
+
+            const color = TS_COLORS[panel.traces.length % TS_COLORS.length];
+            Plotly.addTraces(panelId, [{
+                x: sig.t, y: sig.y,
+                name: sigKey,
+                type: 'scatter', mode: 'lines',
+                line: { color, width: 1.5 },
+                hovertemplate: `%{y:.3f} ${sig.unit}<extra>${sig.field}</extra>`
+            }]);
+        }
+
+        function tsRemovePanel(id) {
+            const idx = tsPanels.findIndex(p => p.id === id);
+            if (idx > -1) tsPanels.splice(idx, 1);
+            const wrap = document.getElementById(id + '-wrap');
+            if (wrap) wrap.remove();
+            if (tsPanels.length === 0) document.getElementById('ts-empty-hint').style.display = 'flex';
+        }
+
+        function tsResizePanel(id, delta) {
+            const wrap = document.getElementById(id + '-wrap');
+            if (!wrap) return;
+            const cur = parseInt(wrap.style.height) || 220;
+            wrap.style.height = Math.max(120, cur + delta) + 'px';
+            Plotly.relayout(id, {});
+        }
+
+        function tsClearAll() {
+            tsPanels.forEach(p => { const w=document.getElementById(p.id+'-wrap'); if(w) w.remove(); });
+            tsPanels = [];
+            document.getElementById('ts-empty-hint').style.display = 'flex';
+        }
+
+        function tsInit() {
+            if (!tsInited) {
+                tsInited = true;
+                const panels = document.getElementById('ts-panels');
+                panels.addEventListener('dragover', e => e.preventDefault());
+                panels.addEventListener('drop', e => {
+                    e.preventDefault();
+                    const key = e.dataTransfer.getData('text/sigkey');
+                    if (key && (e.target.id === 'ts-panels' || e.target.id === 'ts-empty-hint')) {
+                        tsAddPanel(key);
+                    }
+                });
+            }
+            tsBuildSignals();
+            tsRenderTree();
+        }
+     </script>
+
+    <!-- 3D FLIGHT PATH & PARSER SCRIPTS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+    <script>
+        // ArduPilot .BIN parser
+        const FP_HDR1 = 0xA3, FP_HDR2 = 0x95, FP_FMT = 128;
+        const FP_SIZES = {b:1,B:1,h:2,H:2,i:4,I:4,f:4,d:8,n:4,N:16,Z:64,c:2,C:2,e:4,E:4,L:4,M:1,q:8,Q:8};
+
+        function fpParseLog(buffer) {
+            const bytes = new Uint8Array(buffer);
+            const dv = new DataView(buffer);
+            const fmts = {}, recs = {};
+            let i = 0;
+            while (i < bytes.length - 3) {
+                if (bytes[i] !== FP_HDR1 || bytes[i+1] !== FP_HDR2) { i++; continue; }
+                const t = bytes[i+2]; i += 3;
+                if (t === FP_FMT) {
+                    if (i + 84 > bytes.length) break;
+                    const ft = bytes[i], fl = bytes[i+1];
+                    const fn = fpStr(bytes, i+2, 4), ff = fpStr(bytes, i+6, 16), fc = fpStr(bytes, i+22, 64);
+                    fmts[ft] = { type:ft, length:fl, name:fn, fmt:ff, cols:fc.split(',').map(s=>s.trim()).filter(Boolean) };
+                    i += 84;
+                } else {
+                    const fmt = fmts[t]; if (!fmt) { i++; continue; }
+                    const bl = fmt.length - 3;
+                    if (i + bl > bytes.length) break;
+                    const rec = fpDecodeRec(dv, i, fmt);
+                    if (rec) { if (!recs[fmt.name]) recs[fmt.name]=[]; recs[fmt.name].push(rec); }
+                    i += bl;
+                }
+            }
+            return recs;
+        }
+
+        function fpStr(bytes, off, max) {
+            let s=''; for (let k=0;k<max;k++) { const c=bytes[off+k]; if(!c) break; s+=String.fromCharCode(c); } return s;
+        }
+
+        function fpDecodeRec(dv, off, fmt) {
+            const rec={}, cols=fmt.cols, fs=fmt.fmt; let pos=off;
+            try {
+                for (let k=0;k<fs.length&&k<cols.length;k++) {
+                    const t=fs[k], sz=FP_SIZES[t]; if (!sz||pos+sz>dv.byteLength) return null;
+                    let v;
+                    switch(t){
+                        case 'b': v=dv.getInt8(pos);break; case 'B':case 'M':v=dv.getUint8(pos);break;
+                        case 'h': v=dv.getInt16(pos,true);break; case 'H':v=dv.getUint16(pos,true);break;
+                        case 'i':case 'L':v=dv.getInt32(pos,true);break; case 'I':case 'E':v=dv.getUint32(pos,true);break;
+                        case 'f': v=dv.getFloat32(pos,true);break; case 'd':v=dv.getFloat64(pos,true);break;
+                        case 'c': v=dv.getInt16(pos,true)/100;break; case 'C':v=dv.getUint16(pos,true)/100;break;
+                        case 'e': v=dv.getInt32(pos,true)/100;break;
+                        case 'q': v=Number(dv.getBigInt64(pos,true));break; case 'Q':v=Number(dv.getBigUint64(pos,true));break;
+                        case 'n':case 'N':case 'Z':{ const ml=FP_SIZES[t],bs=[]; for(let x=0;x<ml;x++){const c=dv.getUint8(pos+x);if(!c)break;bs.push(c);} v=String.fromCharCode(...bs); break; }
+                        default: v=0;
+                    }
+                    rec[cols[k]]=v; pos+=sz;
+                }
+                return rec;
+            } catch(e){ return null; }
+        }
+
+        function fpExtractPath(recs) {
+            let raw=null;
+            for (const k of ['GPS','GPS2','POS','GPOS']) { if(recs[k]&&recs[k].length>10){raw=recs[k];break;} }
+            if (!raw) { for (const [k,v] of Object.entries(recs)) { if(v[0]&&('Lat' in v[0]||'lat' in v[0])&&v.length>5){raw=v;break;} } }
+            if (!raw) return null;
+            const pts=[];
+            for (const r of raw) {
+                const lat=r.Lat??r.lat??r.Latitude, lng=r.Lng??r.lng??r.Lon??r.lon??r.Longitude;
+                const alt=r.Alt??r.alt??r.RelAlt??r.relalt??r.Altitude??0, spd=r.Spd??r.spd??r.GndSpd??r.speed??0, ts=r.TimeUS??r.TimeMS??r.time??0;
+                if (lat==null||lng==null) continue;
+                const latF=Math.abs(lat)>1000?lat/1e7:lat, lngF=Math.abs(lng)>1000?lng/1e7:lng;
+                if (latF===0&&lngF===0) continue;
+                if (Math.abs(latF)>90||Math.abs(lngF)>180) continue;
+                pts.push({lat:latF,lng:lngF,alt:+alt,spd:+spd,ts:+ts});
+            }
+            return pts.length>1?pts:null;
+        }
+
+        function fpToLocal(pts) {
+            const lat0=pts.reduce((s,p)=>s+p.lat,0)/pts.length;
+            const lng0=pts.reduce((s,p)=>s+p.lng,0)/pts.length;
+            const R=6371000, rad=d=>d*Math.PI/180;
+            return pts.map(p=>({ x:R*Math.cos(rad(lat0))*rad(p.lng-lng0), y:p.alt, z:-R*rad(p.lat-lat0), spd:p.spd, ts:p.ts, lat:p.lat, lng:p.lng, alt:p.alt }));
+        }
+
+        // THREE.JS scene
+        const fpCanvas = document.getElementById('fpCanvas');
+        const fpRenderer = new THREE.WebGLRenderer({canvas:fpCanvas, antialias:true});
+        fpRenderer.setPixelRatio(window.devicePixelRatio);
+        fpRenderer.setClearColor(0x020508,1);
+
+        const fpScene = new THREE.Scene();
+        const fpCamera = new THREE.PerspectiveCamera(55,1,0.1,50000);
+        fpCamera.position.set(0,80,200);
+
+        fpScene.add(new THREE.AmbientLight(0xffffff,0.6));
+        const fpDirLight=new THREE.DirectionalLight(0x88ccff,0.8); fpDirLight.position.set(1,2,1); fpScene.add(fpDirLight);
+
+        const fpGrid=new THREE.GridHelper(1000,40,0x0e2233,0x060d12); fpScene.add(fpGrid);
+        fpScene.add(new THREE.AxesHelper(30));
+
+        const fpGroup=new THREE.Group(); fpScene.add(fpGroup);
+
+        const FP_GRAD=[[0,0x0066ff],[0.2,0x00e5ff],[0.4,0x39ff14],[0.6,0xffff00],[0.8,0xff6b35],[1,0xff0040]];
+        function fpLerp(a,b,t){const ar=(a>>16)&255,ag=(a>>8)&255,ab=a&255,br=(b>>16)&255,bg=(b>>8)&255,bb=b&255;return((ar+(br-ar)*t)|0)<<16|((ag+(bg-ag)*t)|0)<<8|((ab+(bb-ab)*t)|0);}
+        function fpColor(t){t=Math.max(0,Math.min(1,t));for(let i=0;i<FP_GRAD.length-1;i++){if(t<=FP_GRAD[i+1][0]){const lt=(t-FP_GRAD[i][0])/(FP_GRAD[i+1][0]-FP_GRAD[i][0]);return fpLerp(FP_GRAD[i][1],FP_GRAD[i+1][1],lt);}}return FP_GRAD[FP_GRAD.length-1][1];}
+
+        function fpMakeDrone(){
+            const g=new THREE.Group();
+            g.add(Object.assign(new THREE.Mesh(new THREE.SphereGeometry(1.2,12,8),new THREE.MeshPhongMaterial({color:0x00e5ff,emissive:0x004455}))));
+            for(let i=0;i<4;i++){
+                const arm=new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.15,4,6),new THREE.MeshPhongMaterial({color:0x1c2a35}));
+                arm.rotation.z=Math.PI/2; arm.position.set(Math.cos(i*Math.PI/2)*2,0,Math.sin(i*Math.PI/2)*2); arm.rotation.y=i*Math.PI/2; arm.rotation.z=Math.PI/2; g.add(arm);
+                const prop=new THREE.Mesh(new THREE.CircleGeometry(1.2,12),new THREE.MeshBasicMaterial({color:0x00e5ff,transparent:true,opacity:0.3,side:THREE.DoubleSide}));
+                prop.position.set(Math.cos(i*Math.PI/2)*3.8,0.3,Math.sin(i*Math.PI/2)*3.8); prop.rotation.x=Math.PI/2; g.add(prop);
+            }
+            return g;
+        }
+
+        const fpCtrl={_st:'none',_lm:{x:0,y:0},_sph:{theta:0.4,phi:1.1,radius:300},_tgt:new THREE.Vector3(),update(){const{theta,phi,radius}=this._sph;fpCamera.position.set(this._tgt.x+radius*Math.sin(phi)*Math.sin(theta),this._tgt.y+radius*Math.cos(phi),this._tgt.z+radius*Math.sin(phi)*Math.cos(theta));fpCamera.lookAt(this._tgt);},down(e){this._lm={x:e.clientX,y:e.clientY};this._st=e.button===0&&!e.shiftKey?'rot':'pan';},move(e){if(this._st==='rot'){this._sph.theta-=(e.clientX-this._lm.x)*0.005;this._sph.phi=Math.max(0.05,Math.min(Math.PI-0.05,this._sph.phi+(e.clientY-this._lm.y)*0.005));this._lm={x:e.clientX,y:e.clientY};this.update();}else if(this._st==='pan'){const dx=e.clientX-this._lm.x,dy=e.clientY-this._lm.y,right=new THREE.Vector3(),up=new THREE.Vector3(0,1,0),sc=this._sph.radius*0.001;right.crossVectors(fpCamera.getWorldDirection(new THREE.Vector3()),up).normalize();this._tgt.addScaledVector(right,-dx*sc);this._tgt.addScaledVector(up,dy*sc);this._lm={x:e.clientX,y:e.clientY};this.update();}},up(){this._st='none';},wheel(e){this._sph.radius=Math.max(5,Math.min(10000,this._sph.radius*(1+e.deltaY*0.001)));this.update();}};
+        fpCanvas.addEventListener('mousedown',e=>fpCtrl.down(e));
+        window.addEventListener('mousemove',e=>fpCtrl.move(e));
+        window.addEventListener('mouseup',()=>fpCtrl.up());
+        fpCanvas.addEventListener('wheel',e=>{e.preventDefault();fpCtrl.wheel(e);},{passive:false});
+        fpCanvas.addEventListener('contextmenu',e=>e.preventDefault());
+        fpCtrl.update();
+
+        let fpFlightData=null,fpLocalData=null,fpDroneMarker=null,fpPlayIdx=0,fpPlaying=false,fpPlayTimer=null;
+        let fpGlbScene=null;
+
+        function fpBuildScene(){
+            while(fpGroup.children.length) fpGroup.remove(fpGroup.children[0]);
+            fpDroneMarker=null;
+            if(!fpLocalData||fpLocalData.length<2) return;
+            const pts=fpLocalData,n=pts.length,mode=document.getElementById('fpColorMode').value;
+            let mn,mx;
+            if(mode==='altitude'){mn=Math.min(...pts.map(p=>p.y));mx=Math.max(...pts.map(p=>p.y));}
+            else if(mode==='speed'){mn=Math.min(...pts.map(p=>p.spd));mx=Math.max(...pts.map(p=>p.spd));}
+            else{mn=pts[0].ts;mx=pts[n-1].ts;}
+            const rng=(mx-mn)||1;
+            const pos=new Float32Array(n*3),col=new Float32Array(n*3);
+            for(let k=0;k<n;k++){pos[k*3]=pts[k].x;pos[k*3+1]=pts[k].y;pos[k*3+2]=pts[k].z;const v=mode==='altitude'?pts[k].y:mode==='speed'?pts[k].spd:pts[k].ts;const hex=fpColor((v-mn)/rng);col[k*3]=((hex>>16)&255)/255;col[k*3+1]=((hex>>8)&255)/255;col[k*3+2]=(hex&255)/255;}
+            const geo=new THREE.BufferGeometry();geo.setAttribute('position',new THREE.BufferAttribute(pos,3));geo.setAttribute('color',new THREE.BufferAttribute(col,3));fpGroup.add(new THREE.Line(geo,new THREE.LineBasicMaterial({vertexColors:true,linewidth:3})));
+            const sm=new THREE.Mesh(new THREE.SphereGeometry(1.5,10,8),new THREE.MeshPhongMaterial({color:0x39ff14,emissive:0x1a4400}));sm.position.set(pts[0].x,pts[0].y,pts[0].z); fpGroup.add(sm);
+            const em=new THREE.Mesh(new THREE.SphereGeometry(1.5,10,8),new THREE.MeshPhongMaterial({color:0xff6b35,emissive:0x441a00}));em.position.set(pts[n-1].x,pts[n-1].y,pts[n-1].z); fpGroup.add(em);
+            if (fpGlbScene) {fpDroneMarker = fpGlbScene.clone(true);} else {fpDroneMarker = fpMakeDrone();}
+            const sc=Math.max(1,(mx-mn)*0.015+1); fpDroneMarker.scale.set(sc,sc,sc);fpDroneMarker.position.set(pts[0].x,pts[0].y,pts[0].z); fpGroup.add(fpDroneMarker);
+            fpGrid.position.y=mn-0.5;
+            const cx=pts.reduce((s,p)=>s+p.x,0)/n,cy=pts.reduce((s,p)=>s+p.y,0)/n,cz=pts.reduce((s,p)=>s+p.z,0)/n;let md=0; for(const p of pts){const d=Math.sqrt((p.x-cx)**2+(p.y-cy)**2+(p.z-cz)**2);if(d>md)md=d;}
+            fpCtrl._tgt.set(cx,cy,cz); fpCtrl._sph.radius=md*2.5+30; fpCtrl._sph.theta=0.6; fpCtrl._sph.phi=0.9; fpCtrl.update();
+        }
+
+        function fpUpdateDrone(idx){if(!fpDroneMarker||!fpLocalData) return;const p=fpLocalData[idx]; fpDroneMarker.position.set(p.x,p.y,p.z);if(idx<fpLocalData.length-1){const nxt=fpLocalData[idx+1];fpDroneMarker.lookAt(nxt.x,nxt.y,nxt.z);}}
+        function fpUpdatePlayhead(idx){if(!fpLocalData) return;const t=fpLocalData.length>1?idx/(fpLocalData.length-1):0;document.getElementById('fpFill').style.width=(t*100)+'%';document.getElementById('fpThumb').style.left=(t*100)+'%';const secs=fpFlightData[0].ts>1e9?(fpFlightData[idx].ts-fpFlightData[0].ts)/1e6:(fpFlightData[idx].ts-fpFlightData[0].ts)/1000;document.getElementById('fpTimeLabel').textContent=`${Math.floor(secs/60)}:${String(Math.floor(secs%60)).padStart(2,'0')}`;fpUpdateDrone(idx);}
+        function fpStopPlay(){fpPlaying=false; if(fpPlayTimer)clearInterval(fpPlayTimer);document.getElementById('fpPlayBtn').textContent='▶ PLAY';}
+        function fpTogglePlay(){if(!fpLocalData) return;if(fpPlaying){fpStopPlay();}else{if(fpPlayIdx>=fpLocalData.length-1) fpPlayIdx=0;fpPlaying=true; document.getElementById('fpPlayBtn').textContent='⏸ PAUSE';fpPlayTimer=setInterval(()=>{fpPlayIdx++;if(fpPlayIdx>=fpLocalData.length){fpStopPlay();fpPlayIdx=fpLocalData.length-1;}fpUpdatePlayhead(fpPlayIdx);},50);}}
+        function fpTimelineClick(e){if(!fpLocalData) return;const rect=document.getElementById('fpTimeline').getBoundingClientRect();fpPlayIdx=Math.round(((e.clientX-rect.left)/rect.width)*(fpLocalData.length-1));fpUpdatePlayhead(fpPlayIdx);}
+        function fpCamTop(){fpCtrl._sph.phi=0.01;fpCtrl._sph.theta=0;fpCtrl.update();}
+        function fpCamSide(){fpCtrl._sph.phi=Math.PI/2;fpCtrl._sph.theta=0;fpCtrl.update();}
+        function fpCamReset(){fpCtrl._sph.theta=0.6;fpCtrl._sph.phi=0.9;fpCtrl.update();}
+
+        function fpLoadBuffer(buffer, filename){
+            const recs = fpParseLog(buffer);
+            const pts = fpExtractPath(recs);
+            if (!pts){ document.getElementById('fpEmpty').style.display='flex'; return; }
+            document.getElementById('fpEmpty').style.display='none';
+            fpFlightData=pts; fpLocalData=fpToLocal(pts);
+            fpBuildScene(); fpStopPlay(); fpPlayIdx=0; fpUpdatePlayhead(0);
+            const alts=pts.map(p=>p.alt), spds=pts.map(p=>p.spd);
+            const n=pts.length;
+            let dist=0; for(let i=1;i<fpLocalData.length;i++){const dx=fpLocalData[i].x-fpLocalData[i-1].x,dz=fpLocalData[i].z-fpLocalData[i-1].z;dist+=Math.sqrt(dx*dx+dz*dz);}
+            const tsRange=pts[n-1].ts-pts[0].ts, secs=pts[0].ts>1e9?tsRange/1e6:tsRange/1000;
+            document.getElementById('fp-stats').innerHTML=`
+                <div class="stat-box"><div class="stat-label">GPS Points</div><div class="stat-value">${n}</div></div>
+                <div class="stat-box"><div class="stat-label">Max Altitude</div><div class="stat-value">${Math.max(...alts).toFixed(1)}<span class="stat-unit">m</span></div></div>
+                <div class="stat-box"><div class="stat-label">Distance</div><div class="stat-value">${dist.toFixed(0)}<span class="stat-unit">m</span></div></div>
+                <div class="stat-box"><div class="stat-label">Max Speed</div><div class="stat-value">${Math.max(...spds).toFixed(1)}<span class="stat-unit">m/s</span></div></div>
+                <div class="stat-box"><div class="stat-label">Duration</div><div class="stat-value">${Math.floor(secs/60)}:${String(Math.floor(secs%60)).padStart(2,'0')}</div></div>
+            `;
+        }
+
+        function fpLoadGLB(input) {
+            const file = input.files[0];
+            if (!file) return;
+            const statusEl = document.getElementById('glb-status');
+            statusEl.textContent = 'Loading...';
+            statusEl.style.color = '#FFD93D';
+
+            const url = URL.createObjectURL(file);
+            const loader = new THREE.GLTFLoader();
+            loader.load(url, (gltf) => {
+                URL.revokeObjectURL(url);
+                fpGlbScene = gltf.scene;
+                const box = new THREE.Box3().setFromObject(fpGlbScene);
+                const size = new THREE.Vector3();
+                box.getSize(size);
+                const maxDim = Math.max(size.x, size.y, size.z);
+                if (maxDim > 0) fpGlbScene.scale.setScalar(1 / maxDim);
+                const center = new THREE.Vector3();
+                box.getCenter(center);
+                fpGlbScene.position.sub(center.multiplyScalar(1 / maxDim));
+                statusEl.textContent = file.name;
+                statusEl.style.color = '#4caf50';
+                if (fpLocalData) fpBuildScene();
+            }, undefined, (err) => {
+                URL.revokeObjectURL(url);
+                statusEl.textContent = 'Failed to load model';
+                statusEl.style.color = '#e94560';
+            });
+        }
+
+        function fpAnimate(){
+            requestAnimationFrame(fpAnimate);
+            const w=fpCanvas.clientWidth,h=fpCanvas.clientHeight;
+            if(fpCanvas.width!==w||fpCanvas.height!==h){fpRenderer.setSize(w,h,false);fpCamera.aspect=w/h;fpCamera.updateProjectionMatrix();}
+            if(fpDroneMarker&&!fpPlaying&&!fpGlbScene) fpDroneMarker.children.forEach(c=>{if(c.geometry&&c.geometry.type==='CircleGeometry')c.rotation.z+=0.02;});
+            fpRenderer.render(fpScene,fpCamera);
+        }
+        fpAnimate();
+    </script>
+</body>
+</html>
