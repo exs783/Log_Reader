@@ -389,6 +389,7 @@
         <button class="nav-btn" onclick="showPage('barometer', event)" disabled>Barometer</button>
         <button class="nav-btn" onclick="showPage('events', event)" disabled>Events</button>
         <button class="nav-btn" onclick="showPage('magnetometer', event)" disabled>Magnetometer</button>
+        <button class="nav-btn" onclick="showPage('customplot', event)" disabled>Custom Plot</button>
     </nav>
 
     <div class="container">
@@ -551,6 +552,25 @@
                 </div>
             </div>
         </div>
+        <!-- CUSTOM PLOT PAGE -->
+        <div id="customplot" class="page">
+            <h2 class="section-title">Custom Plot</h2>
+            <div class="info-panel">
+                <h2>Any Variable vs Time</h2>
+                <p>Pick any number of variables from the loaded log and plot them together over time.</p>
+            </div>
+            <div style="display:flex; gap:16px; align-items:flex-start;">
+                <div class="card" style="flex:0 0 280px; max-height:640px; overflow-y:auto;">
+                    <h3>Variables</h3>
+                    <div id="customplot-vars" style="display:flex; flex-direction:column; gap:14px;"></div>
+                    <button class="file-input-label" style="border:none; margin-top:16px;" onclick="generateCustomPlot()">Plot Selected</button>
+                </div>
+                <div class="card" style="flex:1; min-width:0;">
+                    <h3>Selected Variables Over Time</h3>
+                    <div class="plot-container" id="customplot-plot"></div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <footer>&copy; 2026 &mdash; Pixhawk Log Analyzer &mdash; Drone Flight Intelligence</footer>
@@ -630,6 +650,81 @@
             else if (pageId === 'barometer') generateBarometerPlot();
             else if (pageId === 'events') generateEventsPage();
             else if (pageId === 'magnetometer') generateMagnetometerPlot();
+            else if (pageId === 'customplot') generateCustomPlotOptions();
+        }
+
+        // Custom plot: any number of variables vs time
+        const CATEGORY_LABELS = {
+            imu: 'IMU', vibration: 'Vibration', attitude: 'Attitude', battery: 'Battery',
+            motors: 'Motors', pid: 'PID', gps: 'GPS', barometer: 'Barometer', magnetometer: 'Magnetometer',
+        };
+
+        function getCustomPlotSeries() {
+            const series = [];
+            for (const [category, obj] of Object.entries(currentData || {})) {
+                if (!obj || !Array.isArray(obj.timestamps) || obj.timestamps.length === 0) continue;
+                const n = obj.timestamps.length;
+                for (const [field, value] of Object.entries(obj)) {
+                    if (field === 'timestamps' || field === 'stats' || field === 'motors') continue;
+                    if (!Array.isArray(value) || value.length !== n || typeof value[0] !== 'number') continue;
+                    series.push({
+                        id: `${category}.${field}`,
+                        label: `${CATEGORY_LABELS[category] || category}: ${field}`,
+                        timestamps: obj.timestamps,
+                        values: value,
+                    });
+                }
+            }
+            return series;
+        }
+
+        function generateCustomPlotOptions() {
+            const series = getCustomPlotSeries();
+            const container = document.getElementById('customplot-vars');
+            if (series.length === 0) {
+                container.innerHTML = '<div class="no-data">No plottable variables found.</div>';
+                return;
+            }
+            container.innerHTML = series.map(s => `
+                <label style="display:flex; align-items:center; gap:8px; font-size:13px; cursor:pointer;">
+                    <input type="checkbox" value="${s.id}" class="customplot-checkbox">
+                    ${s.label}
+                </label>
+            `).join('');
+        }
+
+        function generateCustomPlot() {
+            const series = getCustomPlotSeries();
+            const seriesById = Object.fromEntries(series.map(s => [s.id, s]));
+            const selected = Array.from(document.querySelectorAll('.customplot-checkbox:checked')).map(cb => cb.value);
+
+            if (selected.length === 0) {
+                alert('Select at least one variable to plot');
+                return;
+            }
+
+            const colors = ['#dc2626', '#0f9488', '#2f6fed', '#16a34a', '#d97706', '#7c6ff0', '#db2777', '#0891b2'];
+            const traces = selected.map((id, i) => {
+                const s = seriesById[id];
+                return {
+                    x: s.timestamps.map(t => t / 1e6),
+                    y: s.values,
+                    name: s.label,
+                    line: { color: colors[i % colors.length] },
+                };
+            });
+
+            const layout = {
+                title: '',
+                xaxis: { title: 'Time (s)', ...CHART_AXIS },
+                yaxis: { title: 'Value', color: '#667085' },
+                hovermode: 'x unified',
+                ...CHART_BG,
+                font: CHART_FONT,
+                margin: { l: 60, r: 20, t: 20, b: 60 },
+            };
+
+            Plotly.newPlot('customplot-plot', traces, layout, { responsive: true });
         }
 
         // Overview page
