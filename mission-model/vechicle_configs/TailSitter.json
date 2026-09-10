@@ -1,0 +1,92 @@
+[
+  {
+    "name": "TailSitter_Contra_Compact",
+    "num_rotors": 2,
+    "base_mass_g": 16000,
+    "arm_mass_g": 3000,
+    "drag_cd": 0.35,
+    "wing_area_m2": 2.84,
+    "wing_cl": 0.55,
+    "cruise_velocity_mps": 32
+  },
+  {
+    "name": "TailSitter_Contra_Balanced",
+    "num_rotors": 2,
+    "base_mass_g": 17500,
+    "arm_mass_g": 3000,
+    "drag_cd": 0.35,
+    "wing_area_m2": 3.95,
+    "wing_cl": 0.60,
+    "cruise_velocity_mps": 26
+  },
+  {
+    "name": "TailSitter_Contra_Big",
+    "num_rotors": 2,
+    "base_mass_g": 19000,
+    "arm_mass_g": 3000,
+    "drag_cd": 0.35,
+    "wing_area_m2": 5.09,
+    "wing_cl": 0.65,
+    "cruise_velocity_mps": 22
+  },
+  {
+    "name": "TailSitter_Quad_Compact",
+    "num_rotors": 4,
+    "base_mass_g": 16000,
+    "arm_mass_g": 5500,
+    "drag_cd": 0.35,
+    "wing_area_m2": 2.84,
+    "wing_cl": 0.55,
+    "cruise_velocity_mps": 32
+  },
+  {
+    "name": "TailSitter_Quad_Balanced",
+    "num_rotors": 4,
+    "base_mass_g": 17500,
+    "arm_mass_g": 5500,
+    "drag_cd": 0.35,
+    "wing_area_m2": 3.95,
+    "wing_cl": 0.60,
+    "cruise_velocity_mps": 26
+  },
+  {
+    "name": "TailSitter_Quad_Big",
+    "num_rotors": 4,
+    "base_mass_g": 19000,
+    "arm_mass_g": 5500,
+    "drag_cd": 0.35,
+    "wing_area_m2": 5.09,
+    "wing_cl": 0.65,
+    "cruise_velocity_mps": 22
+  },
+  {
+    "name": "TailSitter_Bicopter_Compact",
+    "num_rotors": 2,
+    "base_mass_g": 16000,
+    "arm_mass_g": 3500,
+    "drag_cd": 0.35,
+    "wing_area_m2": 2.84,
+    "wing_cl": 0.55,
+    "cruise_velocity_mps": 32
+  },
+  {
+    "name": "TailSitter_Bicopter_Balanced",
+    "num_rotors": 2,
+    "base_mass_g": 17500,
+    "arm_mass_g": 3500,
+    "drag_cd": 0.35,
+    "wing_area_m2": 3.95,
+    "wing_cl": 0.60,
+    "cruise_velocity_mps": 26
+  },
+  {
+    "name": "TailSitter_Bicopter_Big",
+    "num_rotors": 2,
+    "base_mass_g": 19000,
+    "arm_mass_g": 3500,
+    "drag_cd": 0.35,
+    "wing_area_m2": 5.09,
+    "wing_cl": 0.65,
+    "cruise_velocity_mps": 22
+  }
+]

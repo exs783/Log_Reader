@@ -1,0 +1,30 @@
+[
+  {
+    "motor_model": "MAD_AM90",
+    "prop_diameter_in": null,
+    "motor_mass_g": 9400,
+    "prop_mass_g": null,
+    "motor_cost": 3715,
+    "prop_cost": null,
+    "cells_s": null,
+    "throttle_pct": [
+      100
+    ],
+    "thrust_g": [
+      178000
+    ],
+    "current_a": [
+      null
+    ],
+    "_verified": {
+      "kv": 8.5,
+      "peak_thrust_kg": 178,
+      "rated_thrust_kg": [
+        85,
+        95
+      ]
+    },
+    "_data_source": "endpoints_only",
+    "_notes": "MAD AeroMax AM90, 8.5KV. Rated continuous 85-95 kgf, peak 178 kgf. Prop options 72x31 or 72x25 (unclear which was used for peak rating). No full throttle sweep publicly extractable -- the kit page's test data is an image chart, not text. Motor price $3715 confirmed from mad-motor.com."
+  }
+]

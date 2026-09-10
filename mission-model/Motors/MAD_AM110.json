@@ -1,0 +1,16 @@
+[
+  {
+    "motor_model": "MAD_AM110",
+    "prop_diameter_in": 29,
+    "motor_mass_g": 10400,
+    "prop_mass_g": null,
+    "motor_cost": 4285,
+    "prop_cost": null,
+    "cells_s": null,
+    "voltage_v": [400],
+    "throttle_pct": [30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100],
+    "thrust_g": [41700, 55000, 68300, 82900, 96700, 110800, 124200, 138900, 150100, 164200, 178300, 190600, 203700, 214400, 226300],
+    "current_a": [11.68, 17.32, 24.07, 31.46, 40.06, 49.17, 58.65, 69.42, 79.32, 91.36, 105.24, 115.17, 127.99, 143.27, 159.94],
+    "_notes": "Full sweep from MAD's own AM110 power-system-kit test bench data (9KV motor + SineSic 160A Pro ESC + 73x29 prop, tested at 400V). Source: mad-motor.com/products/am110-heavy-lift-drone-power-system-kit. 100% thrust (226kgf) exceeds the 196kgf peak-thrust spec figure since the kit test uses a larger prop/voltage than the base rating."
+  }
+]

@@ -1,0 +1,11 @@
+[
+    {
+        "name": "MSC 54x20",
+        "type": "propeller",
+        "material": "carbon_fiber",
+        "weight": 420,
+        "max_rpm_rec": 3000,
+        "Thrust_Limit": 120000
+    }
+
+}

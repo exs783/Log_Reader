@@ -1,0 +1,14 @@
+[
+  {
+    "motor_model": "M50C35_PRO_EEE_34kv",
+    "prop_diameter_in": 30,
+    "motor_mass_g": 1500,
+    "prop_mass_g": 300,
+    "motor_cost": 400,
+    "prop_cost": 100,
+    "cells_s": 24,
+    "throttle_pct": [30, 50, 60, 70, 80, 90, 100],
+    "thrust_g": [13360, 35262, 49381, 63961, 80002, 96733, 113654],
+    "current_a": [10.63, 42, 68.22, 102.19, 147.52, 203.99, 251.48]
+  }
+]

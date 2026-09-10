@@ -1,0 +1,16 @@
+[
+  {
+    "motor_model": "MAD_M90C60_EEE_9kv",
+    "prop_diameter_in": 72,
+    "motor_mass_g": 12700,
+    "prop_mass_g": null,
+    "motor_cost": 5000,
+    "prop_cost": null,
+    "cells_s": null,
+    "voltage_v": [354],
+    "throttle_pct": [30, 35, 40, 45, 50, 55, 60, 65, 70, 75],
+    "thrust_g": [38132, 50974, 65229, 77400, 87951, 104749, 112748, 120717, 144578, 158014],
+    "current_a": [11.94, 17.22, 24.73, 33.53, 41.55, 49.85, 56.93, 62.06, 72.24, 83.41],
+    "_notes": "MAD HB110 72x31 kit test data (M90C60 EEE 9KV motor + SineSic 160A Pro ESC + CB2 72x31 prop, tested at 354V). Only 30-75% throttle published as text; 80-100% exists as an unextracted chart image on the source page (rcdrone.top/products/mad-hb110-72x31...). Motor price $5000 confirmed from store.mad-motor.com."
+  }
+]

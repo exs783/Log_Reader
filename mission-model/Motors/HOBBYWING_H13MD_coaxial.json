@@ -1,0 +1,14 @@
+[
+  {
+    "motor_model": "HOBBYWING_H13MD_coaxial_axis",
+    "prop_diameter_in": 54,
+    "motor_mass_g": 2450,
+    "prop_mass_g": 420,
+    "motor_cost": null,
+    "prop_cost": null,
+    "cells_s": 24,
+    "throttle_pct": [35, 51, 61, 71, 80, 85, 100],
+    "thrust_g": [18490, 25125, 37944, 52586, 69330, 85567, 106991],
+    "current_a": [19.5, 29.5, 54.6, 87.8, 133.0, 188.2, 273.6]
+  }
+]

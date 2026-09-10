@@ -1,0 +1,1288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DRONE FLIGHT PATH VIEWER</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600;700&display=swap');
+
+  :root {
+    --bg:       #080c10;
+    --panel:    #0d1318;
+    --border:   #1c2a35;
+    --accent:   #00e5ff;
+    --accent2:  #ff6b35;
+    --accent3:  #39ff14;
+    --text:     #a8c4cc;
+    --dim:      #3a5260;
+    --mono:     'Share Tech Mono', monospace;
+    --sans:     'Barlow Condensed', sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── TOP BAR ── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    flex-shrink: 0;
+    z-index: 10;
+  }
+
+  .logo {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--accent);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+  .logo span { color: var(--dim); }
+
+  .header-stats {
+    display: flex;
+    gap: 28px;
+  }
+  .stat {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+  }
+  .stat-label {
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--dim);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+  }
+  .stat-value {
+    font-family: var(--mono);
+    font-size: 15px;
+    color: var(--accent);
+  }
+  .stat-value.orange { color: var(--accent2); }
+  .stat-value.green  { color: var(--accent3); }
+
+  /* ── MAIN LAYOUT ── */
+  .main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* ── SIDEBAR ── */
+  .sidebar {
+    width: 240px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    padding: 16px;
+    gap: 16px;
+    overflow-y: auto;
+  }
+
+  .section-title {
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 3px;
+    color: var(--dim);
+    text-transform: uppercase;
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* drop zone */
+  .drop-zone {
+    border: 1px dashed var(--dim);
+    border-radius: 4px;
+    padding: 24px 12px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s, background 0.2s;
+    position: relative;
+  }
+  .drop-zone:hover, .drop-zone.over {
+    border-color: var(--accent);
+    background: rgba(0,229,255,0.04);
+  }
+  .drop-zone input {
+    position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%;
+  }
+  .drop-icon {
+    font-size: 28px;
+    margin-bottom: 8px;
+    display: block;
+  }
+  .drop-text {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--dim);
+    line-height: 1.6;
+  }
+  .drop-text strong { color: var(--accent); display: block; font-size: 11px; margin-bottom: 4px; }
+
+  /* controls */
+  .ctrl-group { display: flex; flex-direction: column; gap: 10px; }
+
+  .ctrl-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .ctrl-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text);
+  }
+
+  input[type=range] {
+    -webkit-appearance: none;
+    width: 100px;
+    height: 2px;
+    background: var(--border);
+    border-radius: 2px;
+    outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+  }
+
+  .toggle-btn {
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 4px 10px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--dim);
+    cursor: pointer;
+    border-radius: 2px;
+    transition: all 0.15s;
+    letter-spacing: 1px;
+  }
+  .toggle-btn.active {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: rgba(0,229,255,0.08);
+  }
+
+  /* color bar */
+  .color-legend {
+    height: 8px;
+    border-radius: 4px;
+    background: linear-gradient(to right, #0066ff, #00e5ff, #39ff14, #ffff00, #ff6b35, #ff0040);
+    margin-top: 4px;
+  }
+  .color-legend-labels {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 8px;
+    color: var(--dim);
+    margin-top: 3px;
+  }
+
+  /* info panel */
+  .info-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 6px;
+  }
+  .info-cell {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 6px 8px;
+  }
+  .info-cell-label {
+    font-family: var(--mono);
+    font-size: 8px;
+    color: var(--dim);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 2px;
+  }
+  .info-cell-value {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+  }
+
+  /* ── CANVAS AREA ── */
+  .canvas-wrap {
+    flex: 1;
+    position: relative;
+    overflow: hidden;
+  }
+
+  #threeCanvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  /* overlay hints */
+  .canvas-overlay {
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    font-family: var(--mono);
+    font-size: 9px;
+    color: var(--dim);
+    text-align: right;
+    pointer-events: none;
+    line-height: 1.8;
+    letter-spacing: 1px;
+  }
+
+  .playhead-bar {
+    position: absolute;
+    bottom: 0; left: 0; right: 0;
+    height: 32px;
+    background: rgba(8,12,16,0.92);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 16px;
+    gap: 12px;
+  }
+  #playBtn {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 14px;
+    border: 1px solid var(--accent);
+    background: rgba(0,229,255,0.08);
+    color: var(--accent);
+    cursor: pointer;
+    border-radius: 2px;
+    letter-spacing: 2px;
+    flex-shrink: 0;
+  }
+  #playBtn:hover { background: rgba(0,229,255,0.18); }
+
+  #timeline {
+    flex: 1;
+    height: 2px;
+    background: var(--border);
+    border-radius: 2px;
+    cursor: pointer;
+    position: relative;
+  }
+  #timelineFill {
+    height: 100%;
+    background: linear-gradient(to right, #0066ff, var(--accent));
+    border-radius: 2px;
+    width: 0%;
+    transition: width 0.05s linear;
+  }
+  #timelineThumb {
+    position: absolute;
+    top: 50%; transform: translate(-50%, -50%);
+    width: 10px; height: 10px;
+    background: var(--accent);
+    border-radius: 50%;
+    left: 0%;
+    pointer-events: none;
+  }
+
+  #timeLabel {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--text);
+    flex-shrink: 0;
+    min-width: 50px;
+    text-align: right;
+  }
+
+  /* Loading */
+  #loadingOverlay {
+    position: absolute; inset: 0;
+    background: rgba(8,12,16,0.88);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 20;
+    font-family: var(--mono);
+    gap: 16px;
+  }
+  #loadingOverlay.hidden { display: none; }
+  .spinner {
+    width: 36px; height: 36px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #loadingText {
+    font-size: 11px;
+    color: var(--accent);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+  #loadingStatus {
+    font-size: 9px;
+    color: var(--dim);
+    letter-spacing: 2px;
+  }
+
+  /* Empty state */
+  #emptyState {
+    position: absolute; inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    gap: 12px;
+  }
+  #emptyState.hidden { display: none; }
+  .empty-icon {
+    font-size: 48px;
+    opacity: 0.15;
+  }
+  .empty-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--dim);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+  }
+
+  /* Error toast */
+  #errorToast {
+    position: absolute;
+    top: 12px; left: 50%; transform: translateX(-50%);
+    background: rgba(255, 50, 50, 0.15);
+    border: 1px solid #ff3333;
+    color: #ff8888;
+    font-family: var(--mono);
+    font-size: 10px;
+    padding: 8px 18px;
+    border-radius: 3px;
+    letter-spacing: 1px;
+    z-index: 30;
+    transition: opacity 0.3s;
+  }
+  #errorToast.hidden { display: none; }
+
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">&#9670; <span>UAV //</span> FLIGHT PATH VIEWER</div>
+  <div class="header-stats">
+    <div class="stat">
+      <span class="stat-label">Duration</span>
+      <span class="stat-value" id="hDuration">--:--</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Max Alt</span>
+      <span class="stat-value orange" id="hMaxAlt">-- m</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Distance</span>
+      <span class="stat-value green" id="hDist">-- m</span>
+    </div>
+    <div class="stat">
+      <span class="stat-label">Points</span>
+      <span class="stat-value" id="hPoints">--</span>
+    </div>
+  </div>
+</header>
+
+<div class="main">
+
+  <aside class="sidebar">
+
+    <div>
+      <div class="section-title">Load Log</div>
+      <div class="drop-zone" id="dropZone">
+        <input type="file" accept=".bin,.log" id="fileInput">
+        <span class="drop-icon">📡</span>
+        <div class="drop-text">
+          <strong>Drop .bin / .log here</strong>
+          ArduPilot DataFlash<br>or click to browse
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">Display</div>
+      <div class="ctrl-group">
+        <div class="ctrl-row">
+          <span class="ctrl-label">Color by</span>
+          <select id="colorMode" style="background:var(--bg);border:1px solid var(--border);color:var(--text);font-family:var(--mono);font-size:10px;padding:3px 6px;border-radius:2px;outline:none;">
+            <option value="altitude">Altitude</option>
+            <option value="speed">Speed</option>
+            <option value="time">Time</option>
+          </select>
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Line width</span>
+          <input type="range" id="lineWidth" min="1" max="8" value="3">
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Show axes</span>
+          <button class="toggle-btn active" id="axesBtn">ON</button>
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Show grid</span>
+          <button class="toggle-btn active" id="gridBtn">ON</button>
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Drone marker</span>
+          <button class="toggle-btn active" id="markerBtn">ON</button>
+        </div>
+        <div class="ctrl-row">
+          <span class="ctrl-label">Altitude shadow</span>
+          <button class="toggle-btn" id="shadowBtn">OFF</button>
+        </div>
+        <div>
+          <div class="color-legend"></div>
+          <div class="color-legend-labels">
+            <span id="legendLow">LOW</span>
+            <span id="legendHigh">HIGH</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">Flight Info</div>
+      <div class="info-grid">
+        <div class="info-cell">
+          <div class="info-cell-label">Min Alt</div>
+          <div class="info-cell-value" id="iMinAlt">--</div>
+        </div>
+        <div class="info-cell">
+          <div class="info-cell-label">Max Alt</div>
+          <div class="info-cell-value" id="iMaxAlt">--</div>
+        </div>
+        <div class="info-cell">
+          <div class="info-cell-label">Max Spd</div>
+          <div class="info-cell-value" id="iMaxSpd">--</div>
+        </div>
+        <div class="info-cell">
+          <div class="info-cell-label">Avg Spd</div>
+          <div class="info-cell-value" id="iAvgSpd">--</div>
+        </div>
+        <div class="info-cell" style="grid-column:1/-1">
+          <div class="info-cell-label">GPS Points</div>
+          <div class="info-cell-value" id="iGPS">--</div>
+        </div>
+        <div class="info-cell" style="grid-column:1/-1">
+          <div class="info-cell-label">File</div>
+          <div class="info-cell-value" id="iFile" style="font-size:10px;word-break:break-all;">--</div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="section-title">Custom Drone Model</div>
+      <div class="drop-zone" id="modelDropZone" style="padding:16px 12px;">
+        <input type="file" accept=".glb,.gltf,.obj,.png,.jpg,.jpeg,.webp" id="modelInput">
+        <span class="drop-icon" style="font-size:22px;">🚁</span>
+        <div class="drop-text">
+          <strong>Upload model or image</strong>
+          .glb / .gltf — 3D model<br>
+          .png/.jpg — sprite overlay
+        </div>
+      </div>
+      <button class="toggle-btn" id="resetModelBtn" style="width:100%;margin-top:8px;justify-content:center;">RESET TO DEFAULT</button>
+      <div id="modelStatus" style="font-family:var(--mono);font-size:9px;color:var(--dim);margin-top:6px;text-align:center;"></div>
+    </div>
+
+    <div>
+      <div class="section-title">Camera</div>
+      <div class="ctrl-group">
+        <button class="toggle-btn" id="topBtn" style="width:100%;justify-content:center;">TOP VIEW</button>
+        <button class="toggle-btn" id="sideBtn" style="width:100%;justify-content:center;">SIDE VIEW</button>
+        <button class="toggle-btn" id="resetBtn" style="width:100%;justify-content:center;">RESET</button>
+      </div>
+    </div>
+
+  </aside>
+
+  <div class="canvas-wrap">
+    <canvas id="threeCanvas"></canvas>
+
+    <div id="emptyState">
+      <div class="empty-icon">🛸</div>
+      <div class="empty-label">Load a .bin file to begin</div>
+    </div>
+
+    <div id="loadingOverlay" class="hidden">
+      <div class="spinner"></div>
+      <div id="loadingText">PARSING LOG</div>
+      <div id="loadingStatus">Reading binary data...</div>
+    </div>
+
+    <div id="errorToast" class="hidden"></div>
+
+    <div class="canvas-overlay">
+      LMB DRAG — ROTATE &nbsp;|&nbsp; RMB / SCROLL — ZOOM<br>
+      MMB DRAG — PAN &nbsp;|&nbsp; SHIFT+LMB — PAN
+    </div>
+
+    <div class="playhead-bar">
+      <button id="playBtn">▶ PLAY</button>
+      <div id="timeline">
+        <div id="timelineFill"></div>
+        <div id="timelineThumb"></div>
+      </div>
+      <span id="timeLabel">0:00</span>
+    </div>
+  </div>
+
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+
+<script>
+// ══════════════════════════════════════════════════
+//  ARDUPILOT .BIN PARSER  (DataFlash binary format)
+// ══════════════════════════════════════════════════
+const HEADER_BYTE1 = 0xA3;
+const HEADER_BYTE2 = 0x95;
+const FMT_TYPE = 128; // 0x80
+
+// FIX 3: Added 'a' array size attribute mapping (66 bytes)
+const TYPE_SIZES = {
+  'b': 1, 'B': 1, 'h': 2, 'H': 2, 'i': 4, 'I': 4,
+  'f': 4, 'd': 8, 'n': 4, 'N': 16, 'Z': 64,
+  'c': 2, 'C': 2, 'e': 4, 'E': 4, 'L': 4, 'M': 1,
+  'q': 8, 'Q': 8, 'a': 66
+};
+
+function parseDataflashBin(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const dv = new DataView(buffer);
+  const formats = {};
+  const records = {};
+  let i = 0;
+  const len = bytes.length;
+
+  while (i < len - 3) {
+    if (bytes[i] !== HEADER_BYTE1 || bytes[i+1] !== HEADER_BYTE2) { i++; continue; }
+    const msgType = bytes[i+2];
+    i += 3;
+
+    if (msgType === FMT_TYPE) {
+      // FIX 1: Corrected stream step boundary alignment sizes from 84 to 86
+      if (i + 86 > len) break;
+      const fType   = bytes[i];
+      const fLen    = bytes[i+1];
+      const fName   = readString(bytes, i+2, 4);
+      const fFmt    = readString(bytes, i+6, 16);
+      const fCols   = readString(bytes, i+22, 64);
+      formats[fType] = { type: fType, length: fLen, name: fName, fmt: fFmt, columns: fCols.split(',').map(s=>s.trim()).filter(Boolean) };
+      i += 86;
+    } else {
+      const fmt = formats[msgType];
+      if (!fmt) { i++; continue; }
+      const bodyLen = fmt.length - 3;
+      if (i + bodyLen > len) break;
+      const rec = decodeRecord(dv, i, fmt);
+      if (rec) {
+        if (!records[fmt.name]) records[fmt.name] = [];
+        records[fmt.name].push(rec);
+      }
+      i += bodyLen;
+    }
+  }
+  return records;
+}
+
+function readString(bytes, offset, maxLen) {
+  let s = '';
+  for (let k = 0; k < maxLen; k++) {
+    const c = bytes[offset + k];
+    if (c === 0) break;
+    s += String.fromCharCode(c);
+  }
+  return s;
+}
+
+function decodeRecord(dv, offset, fmt) {
+  const rec = {};
+  const cols = fmt.columns;
+  const fmtStr = fmt.fmt;
+  let pos = offset;
+  try {
+    for (let k = 0; k < fmtStr.length && k < cols.length; k++) {
+      const t = fmtStr[k];
+      const col = cols[k];
+      const sz = TYPE_SIZES[t];
+      if (!sz || pos + sz > dv.byteLength) return null;
+      let val;
+      switch(t) {
+        case 'b': val = dv.getInt8(pos); break;
+        case 'B': case 'M': val = dv.getUint8(pos); break;
+        case 'h': val = dv.getInt16(pos, true); break;
+        case 'H': val = dv.getUint16(pos, true); break;
+        // FIX 2: Maps 'L' cleanly to getInt32 to properly unpack negative global coordinates
+        case 'i': case 'L': val = dv.getInt32(pos, true); break;
+        case 'I': case 'E': val = dv.getUint32(pos, true); break;
+        case 'f': val = dv.getFloat32(pos, true); break;
+        case 'c': val = dv.getInt16(pos, true) / 100; break;
+        case 'C': val = dv.getUint16(pos, true) / 100; break;
+        case 'e': val = dv.getInt32(pos, true) / 100; break;
+        case 'd': val = dv.getFloat64(pos, true); break;
+        case 'q': val = Number(dv.getBigInt64(pos, true)); break;
+        case 'Q': val = Number(dv.getBigUint64(pos, true)); break;
+        case 'n': { const bs = []; for(let x=0;x<4;x++) { const c=dv.getUint8(pos+x); if(!c) break; bs.push(c); } val = String.fromCharCode(...bs); break; }
+        case 'N': { const bs = []; for(let x=0;x<16;x++) { const c=dv.getUint8(pos+x); if(!c) break; bs.push(c); } val = String.fromCharCode(...bs); break; }
+        case 'Z': { const bs = []; for(let x=0;x<64;x++) { const c=dv.getUint8(pos+x); if(!c) break; bs.push(c); } val = String.fromCharCode(...bs); break; }
+        default: val = 0;
+      }
+      rec[col] = val;
+      pos += sz;
+    }
+    return rec;
+  } catch(e) { return null; }
+}
+
+// ══════════════════════════════════════════════════
+//  EXTRACT FLIGHT PATH FROM PARSED RECORDS
+// ══════════════════════════════════════════════════
+function extractFlightPath(records) {
+  // FIX 4: Prioritize POS and GPOS keys over absolute GPS metrics
+  const gpsKeys = ['POS', 'GPOS', 'GPS', 'GPS2'];
+  let raw = null;
+  for (const k of gpsKeys) {
+    if (records[k] && records[k].length > 10) { raw = records[k]; break; }
+  }
+  if (!raw) {
+    for (const [k,v] of Object.entries(records)) {
+      if (v[0] && ('Lat' in v[0] || 'lat' in v[0]) && v.length > 5) { raw = v; break; }
+    }
+  }
+  if (!raw) return null;
+
+  const points = [];
+  for (const r of raw) {
+    const lat = r.Lat ?? r.lat ?? r.Latitude;
+    const lng = r.Lng ?? r.lng ?? r.Lon ?? r.lon ?? r.Longitude;
+    // Prioritizes relative height above home location
+    const alt = r.RelHomeAlt ?? r.Alt ?? r.alt ?? r.RelAlt ?? r.relalt ?? r.Altitude ?? 0;
+    const spd = r.Spd ?? r.spd ?? r.GndSpd ?? r.speed ?? 0;
+    const ts  = r.TimeUS ?? r.TimeMS ?? r.time ?? 0;
+    if (lat == null || lng == null) continue;
+
+    const latF = Math.abs(lat) > 1000 ? lat / 1e7 : lat;
+    const lngF = Math.abs(lng) > 1000 ? lng / 1e7 : lng;
+    if (latF === 0 && lngF === 0) continue;
+    if (Math.abs(latF) > 90 || Math.abs(lngF) > 180) continue;
+    points.push({ lat: latF, lng: lngF, alt: +alt, spd: +spd, ts: +ts });
+  }
+  return points.length > 1 ? points : null;
+}
+
+function toLocal(points) {
+  const lat0 = points.reduce((s,p) => s+p.lat, 0) / points.length;
+  const lng0 = points.reduce((s,p) => s+p.lng, 0) / points.length;
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  return points.map(p => ({
+    x: R * Math.cos(toRad(lat0)) * toRad(p.lng - lng0),
+    y: p.alt,
+    z: -R * toRad(p.lat - lat0),
+    spd: p.spd,
+    ts: p.ts,
+    lat: p.lat,
+    lng: p.lng,
+    alt: p.alt
+  }));
+}
+
+// ══════════════════════════════════════════════════
+//  THREE.JS SCENE
+// ══════════════════════════════════════════════════
+const canvas = document.getElementById('threeCanvas');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setClearColor(0x080c10, 1);
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(55, 1, 0.1, 50000);
+camera.position.set(0, 80, 200);
+camera.lookAt(0, 0, 0);
+
+scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+const dirLight = new THREE.DirectionalLight(0x88ccff, 0.8);
+dirLight.position.set(1, 2, 1);
+scene.add(dirLight);
+
+const gridHelper = new THREE.GridHelper(1000, 40, 0x1c2a35, 0x111820);
+scene.add(gridHelper);
+
+const axesHelper = new THREE.AxesHelper(30);
+scene.add(axesHelper);
+
+const flightGroup = new THREE.Group();
+scene.add(flightGroup);
+
+let droneMarker = null;
+let customModelScene = null;
+
+function makeDroneMarker() {
+  if (customModelScene) {
+    const clone = customModelScene.clone(true);
+    clone.userData.isCustom = true;
+    return clone;
+  }
+
+  const g = new THREE.Group();
+  g.userData.isCustom = false;
+
+  const body = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.55, 0.55, 0.22, 16),
+    new THREE.MeshPhongMaterial({ color: 0x1a2530, emissive: 0x050d12 })
+  );
+  g.add(body);
+
+  const dome = new THREE.Mesh(
+    new THREE.SphereGeometry(0.38, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2),
+    new THREE.MeshPhongMaterial({ color: 0x00e5ff, emissive: 0x003344, transparent: true, opacity: 0.85 })
+  );
+  dome.position.y = 0.11;
+  g.add(dome);
+
+  const ARM_LEN = 1.7;
+  const ARM_RAD = 0.07;
+  for (let i = 0; i < 6; i++) {
+    const angle = (i / 6) * Math.PI * 2;
+    const ax = Math.cos(angle);
+    const az = Math.sin(angle);
+
+    const arm = new THREE.Mesh(
+      new THREE.CylinderGeometry(ARM_RAD, ARM_RAD, ARM_LEN, 6),
+      new THREE.MeshPhongMaterial({ color: 0x2a3d4a })
+    );
+    arm.rotation.z = Math.PI / 2;
+    arm.position.set(ax * ARM_LEN / 2, 0, az * ARM_LEN / 2);
+    arm.rotation.order = 'YXZ';
+    arm.rotation.y = -angle;
+    arm.rotation.z = Math.PI / 2;
+    g.add(arm);
+
+    const motor = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.15, 0.15, 0.18, 10),
+      new THREE.MeshPhongMaterial({ color: 0x111a22 })
+    );
+    motor.position.set(ax * ARM_LEN, 0.05, az * ARM_LEN);
+    g.add(motor);
+
+    const prop = new THREE.Mesh(
+      new THREE.CircleGeometry(0.55, 16),
+      new THREE.MeshBasicMaterial({
+        color: i % 2 === 0 ? 0x00e5ff : 0x39ff14,
+        transparent: true, opacity: 0.22, side: THREE.DoubleSide
+      })
+    );
+    prop.position.set(ax * ARM_LEN, 0.15, az * ARM_LEN);
+    prop.rotation.x = Math.PI / 2;
+    prop.userData.isProp = true;
+    prop.userData.spinDir = (i % 2 === 0) ? 1 : -1;
+    g.add(prop);
+
+    for (let b = 0; b < 2; b++) {
+      const blade = new THREE.Mesh(
+        new THREE.BoxGeometry(1.0, 0.01, 0.1),
+        new THREE.MeshPhongMaterial({ color: 0x0a1520, transparent: true, opacity: 0.7 })
+      );
+      blade.position.set(ax * ARM_LEN, 0.15, az * ARM_LEN);
+      blade.rotation.y = angle + b * Math.PI / 2;
+      blade.userData.isPropBlade = true;
+      blade.userData.spinDir = (i % 2 === 0) ? 1 : -1;
+      g.add(blade);
+    }
+  }
+
+  for (let i = 0; i < 3; i++) {
+    const angle = (i / 3) * Math.PI * 2 + Math.PI / 6;
+    const leg = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.04, 0.04, 0.5, 6),
+      new THREE.MeshPhongMaterial({ color: 0x1a2530 })
+    );
+    leg.position.set(Math.cos(angle) * 0.55, -0.35, Math.sin(angle) * 0.55);
+    leg.rotation.z = Math.cos(angle) * 0.3;
+    leg.rotation.x = Math.sin(angle) * 0.3;
+    g.add(leg);
+  }
+
+  return g;
+}
+
+// Orbit Controls implementation
+const controls = {
+  enabled: true,
+  _state: 'none',
+  _lastMouse: { x: 0, y: 0 },
+  _spherical: { theta: 0.4, phi: 1.1, radius: 300 },
+  _target: new THREE.Vector3(),
+
+  update() {
+    const { theta, phi, radius } = this._spherical;
+    const sinPhi = Math.sin(phi);
+    camera.position.set(
+      this._target.x + radius * sinPhi * Math.sin(theta),
+      this._target.y + radius * Math.cos(phi),
+      this._target.z + radius * sinPhi * Math.cos(theta)
+    );
+    camera.lookAt(this._target);
+  },
+  onMouseDown(e) {
+    if (!this.enabled) return;
+    this._lastMouse = { x: e.clientX, y: e.clientY };
+    if (e.button === 0 && !e.shiftKey) this._state = 'rotate';
+    else if (e.button === 2 || (e.button === 0 && e.shiftKey) || e.button === 1) this._state = 'pan';
+  },
+  onMouseMove(e) {
+    if (this._state === 'rotate') {
+      const dx = e.clientX - this._lastMouse.x;
+      const dy = e.clientY - this._lastMouse.y;
+      this._spherical.theta -= dx * 0.005;
+      this._spherical.phi = Math.max(0.05, Math.min(Math.PI - 0.05, this._spherical.phi + dy * 0.005));
+      this._lastMouse = { x: e.clientX, y: e.clientY };
+      this.update();
+    } else if (this._state === 'pan') {
+      const dx = e.clientX - this._lastMouse.x;
+      const dy = e.clientY - this._lastMouse.y;
+      const right = new THREE.Vector3();
+      const up = new THREE.Vector3();
+      right.crossVectors(camera.getWorldDirection(new THREE.Vector3()), camera.up).normalize();
+      up.copy(camera.up);
+      const scale = this._spherical.radius * 0.001;
+      this._target.addScaledVector(right, -dx * scale);
+      this._target.addScaledVector(up, dy * scale);
+      this._lastMouse = { x: e.clientX, y: e.clientY };
+      this.update();
+    }
+  },
+  onMouseUp() { this._state = 'none'; },
+  onWheel(e) {
+    this._spherical.radius *= (1 + e.deltaY * 0.001);
+    this._spherical.radius = Math.max(5, Math.min(10000, this._spherical.radius));
+    this.update();
+  }
+};
+
+canvas.addEventListener('mousedown', e => controls.onMouseDown(e));
+window.addEventListener('mousemove', e => controls.onMouseMove(e));
+window.addEventListener('mouseup',   e => controls.onMouseUp(e));
+canvas.addEventListener('wheel',     e => { e.preventDefault(); controls.onWheel(e); }, { passive: false });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+controls.update();
+
+// ══════════════════════════════════════════════════
+//  COLOR MAPPING & SCENE GENERATION
+// ══════════════════════════════════════════════════
+const GRAD = [
+  [0, 0x0066ff], [0.2, 0x00e5ff], [0.4, 0x39ff14],
+  [0.6, 0xffff00], [0.8, 0xff6b35], [1, 0xff0040]
+];
+
+function lerpColor(a, b, t) {
+  const ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255;
+  const br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255;
+  return ((ar + (br-ar)*t)|0) << 16 | ((ag + (bg-ag)*t)|0) << 8 | ((ab + (bb-ab)*t)|0);
+}
+
+function gradColor(t) {
+  t = Math.max(0, Math.min(1, t));
+  for (let i = 0; i < GRAD.length - 1; i++) {
+    if (t <= GRAD[i+1][0]) {
+      const lt = (t - GRAD[i][0]) / (GRAD[i+1][0] - GRAD[i][0]);
+      return lerpColor(GRAD[i][1], GRAD[i+1][1], lt);
+    }
+  }
+  return GRAD[GRAD.length-1][1];
+}
+
+let flightData = null;
+let localData  = null;
+let playIdx    = 0;
+let playing    = false;
+let pathLine   = null;
+let altShadow  = null;
+let showAxes   = true;
+let showGrid   = true;
+let showMarker = true;
+let showShadow = false;
+let colorMode  = 'altitude';
+
+function buildScene() {
+  while (flightGroup.children.length) flightGroup.remove(flightGroup.children[0]);
+  droneMarker = null;
+  pathLine = null;
+  altShadow = null;
+  if (!localData || localData.length < 2) return;
+
+  const pts = localData;
+  const n = pts.length;
+
+  let minVal, maxVal;
+  if (colorMode === 'altitude') {
+    minVal = Math.min(...pts.map(p=>p.y));
+    maxVal = Math.max(...pts.map(p=>p.y));
+  } else if (colorMode === 'speed') {
+    minVal = Math.min(...pts.map(p=>p.spd));
+    maxVal = Math.max(...pts.map(p=>p.spd));
+  } else {
+    minVal = pts[0].ts; maxVal = pts[n-1].ts;
+  }
+  const range = (maxVal - minVal) || 1;
+
+  const positions = new Float32Array(n * 3);
+  const colors    = new Float32Array(n * 3);
+  for (let k = 0; k < n; k++) {
+    positions[k*3]   = pts[k].x;
+    positions[k*3+1] = pts[k].y;
+    positions[k*3+2] = pts[k].z;
+    let val = colorMode === 'altitude' ? pts[k].y : colorMode === 'speed' ? pts[k].spd : pts[k].ts;
+    const t = (val - minVal) / range;
+    const hex = gradColor(t);
+    colors[k*3]   = ((hex >> 16) & 255) / 255;
+    colors[k*3+1] = ((hex >>  8) & 255) / 255;
+    colors[k*3+2] = ( hex        & 255) / 255;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+
+  const lw = parseInt(document.getElementById('lineWidth').value) || 3;
+  pathLine = new THREE.Line(geo, new THREE.LineBasicMaterial({ vertexColors: true, linewidth: lw }));
+  flightGroup.add(pathLine);
+
+  if (showShadow) {
+    const shadowPos = new Float32Array(n * 3);
+    for (let k = 0; k < n; k++) {
+      shadowPos[k*3]   = pts[k].x;
+      shadowPos[k*3+1] = minVal - 0.2;
+      shadowPos[k*3+2] = pts[k].z;
+    }
+    const sGeo = new THREE.BufferGeometry();
+    sGeo.setAttribute('position', new THREE.BufferAttribute(shadowPos, 3));
+    altShadow = new THREE.Line(sGeo, new THREE.LineBasicMaterial({ color: 0x1c2a35, linewidth: 1 }));
+    flightGroup.add(altShadow);
+  }
+
+  const cx = pts.reduce((s,p)=>s+p.x,0)/n;
+  const cy = pts.reduce((s,p)=>s+p.y,0)/n;
+  const cz = pts.reduce((s,p)=>s+p.z,0)/n;
+  let maxDist = 0;
+  for (const p of pts) {
+    const d = Math.sqrt((p.x-cx)**2 + (p.y-cy)**2 + (p.z-cz)**2);
+    if (d > maxDist) maxDist = d;
+  }
+
+  droneMarker = makeDroneMarker();
+  const extentMax = maxDist > 0 ? maxDist : 50;
+  const s = Math.max(0.8, Math.min(extentMax * 0.025, 8));
+  droneMarker.scale.set(s, s, s);
+  droneMarker.position.set(pts[0].x, pts[0].y, pts[0].z);
+  droneMarker.visible = showMarker;
+  flightGroup.add(droneMarker);
+
+  gridHelper.position.y = minVal - 0.5;
+
+  controls._target.set(cx, cy, cz);
+  controls._spherical.radius = Math.max(50, maxDist * 2.5);
+  controls.update();
+
+  updateUI();
+}
+
+function updateUI() {
+  if (!flightData || !localData) return;
+  const n = flightData.length;
+  const alts = flightData.map(p=>p.alt);
+  const spds = flightData.map(p=>p.spd);
+
+  const minAlt = Math.min(...alts);
+  const maxAlt = Math.max(...alts);
+  const maxSpd = Math.max(...spds);
+  const avgSpd = spds.reduce((a,b)=>a+b,0)/n;
+
+  const t0 = flightData[0].ts;
+  const t1 = flightData[n-1].ts;
+  const durationSec = (t1 - t0) / 1000000;
+
+  const formatTime = sec => {
+    if (isNaN(sec) || sec < 0) return "--:--";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s < 10 ? '0' : ''}${s}`;
+  };
+
+  document.getElementById('hDuration').innerText = formatTime(durationSec);
+  document.getElementById('hMaxAlt').innerText = maxAlt.toFixed(1) + " m";
+  document.getElementById('iMinAlt').innerText = minAlt.toFixed(1) + " m";
+  document.getElementById('iMaxAlt').innerText = maxAlt.toFixed(1) + " m";
+  document.getElementById('iMaxSpd').innerText = maxSpd.toFixed(1) + " m/s";
+  document.getElementById('iAvgSpd').innerText = avgSpd.toFixed(1) + " m/s";
+  document.getElementById('iGPS').innerText = n;
+  document.getElementById('hPoints').innerText = n;
+
+  let dist = 0;
+  for (let k = 1; k < localData.length; k++) {
+    const dx = localData[k].x - localData[k-1].x;
+    const dz = localData[k].z - localData[k-1].z;
+    dist += Math.sqrt(dx*dx + dz*dz);
+  }
+  document.getElementById('hDist').innerText = dist.toFixed(0) + " m";
+}
+
+function updatePlayhead(idx) {
+  if (!localData || !droneMarker) return;
+  const p = localData[idx];
+  droneMarker.position.set(p.x, p.y, p.z);
+
+  const pct = (idx / (localData.length - 1)) * 100;
+  document.getElementById('timelineFill').style.width = pct + '%';
+  document.getElementById('timelineThumb').style.left = pct + '%';
+
+  const t0 = localData[0].ts;
+  const currentSec = (p.ts - t0) / 1000000;
+  const m = Math.floor(currentSec / 60);
+  const s = Math.floor(currentSec % 60);
+  document.getElementById('timeLabel').innerText = `${m}:${s < 10 ? '0' : ''}${s}`;
+}
+
+const PROP_SPEED = 0.04;
+function animate() {
+  requestAnimationFrame(animate);
+
+  // Resize Viewport handling
+  const w = canvas.clientWidth;
+  const h = canvas.clientHeight;
+  if (canvas.width !== w || canvas.height !== h) {
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+
+  if (droneMarker && droneMarker.visible && !droneMarker.userData.isCustom) {
+    droneMarker.children.forEach(c => {
+      if (c.userData.isProp)      c.rotation.z += PROP_SPEED * c.userData.spinDir;
+      if (c.userData.isPropBlade) c.rotation.y += PROP_SPEED * c.userData.spinDir;
+    });
+  }
+
+  if (playing && localData) {
+    playIdx++;
+    if (playIdx >= localData.length) {
+      playIdx = 0;
+      playing = false;
+      document.getElementById('playBtn').innerText = '▶ PLAY';
+    }
+    updatePlayhead(playIdx);
+  }
+
+  renderer.render(scene, camera);
+}
+
+// ══════════════════════════════════════════════════
+//  UI EVENT HANDLING INTERFACES
+// ══════════════════════════════════════════════════
+document.getElementById('fileInput').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  document.getElementById('iFile').innerText = file.name;
+  document.getElementById('loadingOverlay').classList.remove('hidden');
+  document.getElementById('emptyState').classList.add('hidden');
+
+  const reader = new FileReader();
+  reader.onload = function(evt) {
+    try {
+      const records = parseDataflashBin(evt.target.result);
+      const points = extractFlightPath(records);
+      if (points) {
+        flightData = points;
+        localData = toLocal(points);
+        playIdx = 0;
+        buildScene();
+      } else {
+        showError("No valid flight path positional messages parsed.");
+      }
+    } catch(err) {
+      showError("Error processing binary data flash context: " + err.message);
+    } finally {
+      document.getElementById('loadingOverlay').classList.add('hidden');
+    }
+  };
+  reader.readAsArrayBuffer(file);
+});
+
+function showError(msg) {
+  const t = document.getElementById('errorToast');
+  t.innerText = msg;
+  t.classList.remove('hidden');
+  setTimeout(() => t.classList.add('hidden'), 4000);
+}
+
+document.getElementById('playBtn').addEventListener('click', () => {
+  if (!localData) return;
+  playing = !playing;
+  document.getElementById('playBtn').innerText = playing ? '⏸ PAUSE' : '▶ PLAY';
+});
+
+document.getElementById('colorMode').addEventListener('change', (e) => {
+  colorMode = e.target.value;
+  buildScene();
+});
+
+document.getElementById('lineWidth').addEventListener('input', (e) => {
+  if (pathLine) pathLine.material.linewidth = parseInt(e.target.value);
+});
+
+document.getElementById('axesBtn').addEventListener('click', (e) => {
+  showAxes = !showAxes;
+  axesHelper.visible = showAxes;
+  e.target.classList.toggle('active', showAxes);
+  e.target.innerText = showAxes ? 'ON' : 'OFF';
+});
+
+document.getElementById('gridBtn').addEventListener('click', (e) => {
+  showGrid = !showGrid;
+  gridHelper.visible = showGrid;
+  e.target.classList.toggle('active', showGrid);
+  e.target.innerText = showGrid ? 'ON' : 'OFF';
+});
+
+document.getElementById('markerBtn').addEventListener('click', (e) => {
+  showMarker = !showMarker;
+  if (droneMarker) droneMarker.visible = showMarker;
+  e.target.classList.toggle('active', showMarker);
+  e.target.innerText = showMarker ? 'ON' : 'OFF';
+});
+
+document.getElementById('shadowBtn').addEventListener('click', (e) => {
+  showShadow = !showShadow;
+  e.target.classList.toggle('active', showShadow);
+  e.target.innerText = showShadow ? 'ON' : 'OFF';
+  buildScene();
+});
+
+document.getElementById('topBtn').addEventListener('click', () => {
+  controls._spherical.phi = 0.01;
+  controls.update();
+});
+
+document.getElementById('sideBtn').addEventListener('click', () => {
+  controls._spherical.phi = Math.PI / 2;
+  controls.update();
+});
+
+document.getElementById('resetBtn').addEventListener('click', () => {
+  controls._spherical.theta = 0.4;
+  controls._spherical.phi = 1.1;
+  if (localData) {
+    buildScene();
+  } else {
+    controls._target.set(0,0,0);
+    controls.update();
+  }
+});
+
+document.getElementById('timeline').addEventListener('click', (e) => {
+  if (!localData) return;
+  const rect = e.currentTarget.getBoundingClientRect();
+  const pct = (e.clientX - rect.left) / rect.width;
+  playIdx = Math.floor(pct * (localData.length - 1));
+  playIdx = Math.max(0, Math.min(localData.length - 1, playIdx));
+  updatePlayhead(playIdx);
+});
+
+// Custom 3D Model file loader hook
+document.getElementById('modelInput').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const name = file.name.toLowerCase();
+  document.getElementById('modelStatus').innerText = "Loading " + file.name;
+
+  const url = URL.createObjectURL(file);
+  if (name.endsWith('.glb') || name.endsWith('.gltf')) {
+    const loader = new THREE.GLTFLoader();
+    loader.load(url, (gltf) => {
+      customModelScene = gltf.scene;
+      document.getElementById('modelStatus').innerText = "Loaded 3D model";
+      buildScene();
+    }, undefined, () => {
+      document.getElementById('modelStatus').innerText = "Error loading 3D model";
+    });
+  } else if (name.endsWith('.obj')) {
+    const loader = new THREE.OBJLoader();
+    loader.load(url, (obj) => {
+      customModelScene = obj;
+      document.getElementById('modelStatus').innerText = "Loaded OBJ model";
+      buildScene();
+    }, undefined, () => {
+      document.getElementById('modelStatus').innerText = "Error loading OBJ model";
+    });
+  } else {
+    const texture = new THREE.TextureLoader().load(url, () => {
+      const mat = new THREE.SpriteMaterial({ map: texture });
+      const sprite = new THREE.Sprite(mat);
+      customModelScene = new THREE.Group();
+      customModelScene.add(sprite);
+      document.getElementById('modelStatus').innerText = "Loaded image asset";
+      buildScene();
+    });
+  }
+});
+
+document.getElementById('resetModelBtn').addEventListener('click', () => {
+  customModelScene = null;
+  document.getElementById('modelStatus').innerText = "";
+  buildScene();
+});
+
+const zone = document.getElementById('dropZone');
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('over'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+zone.addEventListener('drop', e => {
+  e.preventDefault();
+  zone.classList.remove('over');
+  const file = e.dataTransfer.files[0];
+  if (file) {
+    document.getElementById('fileInput').files = e.dataTransfer.files;
+    document.getElementById('fileInput').dispatchEvent(new Event('change'));
+  }
+});
+
+animate();
+</script>
+</body>
+</html>

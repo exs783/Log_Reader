@@ -21,7 +21,8 @@ from scipy.spatial.distance import euclidean
 app = Flask(__name__)
 CORS(app)
 
-UPLOAD_FOLDER = 'uploads'
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
 ALLOWED_EXTENSIONS = {'bin', 'log'}
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500MB
 
@@ -996,8 +997,7 @@ def run_analysis(filepath, filename):
 
 @app.route('/')
 def index():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    return send_from_directory(base_dir, 'log_dashboard.html')
+    return send_from_directory(BASE_DIR, 'log_dashboard.html')
 
 
 @app.route('/api/upload', methods=['POST'])

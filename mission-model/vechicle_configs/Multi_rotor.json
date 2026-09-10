@@ -1,0 +1,23 @@
+[
+  {
+    "name": "Hexacopter",
+    "num_rotors": 6,
+    "base_mass_g": 22000,
+    "arm_mass_g": 6000,
+    "drag_cd": 1.0
+  },
+  {
+    "name": "Quadcopter",
+    "num_rotors": 4,
+    "base_mass_g": 18000,
+    "arm_mass_g": 4000,
+    "drag_cd": 1.0
+  },
+  {
+    "name": "x_8",
+    "num_rotors": 8,
+    "base_mass_g": 26000,
+    "arm_mass_g": 8000,
+    "drag_cd": 1.0
+  }
+]

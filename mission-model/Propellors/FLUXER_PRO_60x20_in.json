@@ -1,0 +1,11 @@
+[
+    {
+        "name": "FLUXER_PRO_60x20_in",
+        "type": "propeller",
+        "material": "carbon_fiber",
+        "weight": 993,
+        "max_rpm_rec": 2700,
+        "Thrust_Limit": 120000
+    }
+
+}

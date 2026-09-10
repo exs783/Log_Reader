@@ -1,0 +1,16 @@
+[
+  {
+    "motor_model": "MAD_AM160",
+    "prop_diameter_in": 78,
+    "motor_mass_g": 16400,
+    "prop_mass_g": null,
+    "motor_cost": 5000,
+    "prop_cost": null,
+    "cells_s": null,
+    "voltage_v": [800],
+    "throttle_pct": [30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 80, 85, 90, 95, 100],
+    "thrust_g": [47700, 63000, 80300, 96700, 115000, 128000, 145400, 165000, 185400, 199600, 217200, 235100, 251300, 256900, 258300],
+    "current_a": [7.93, 12.03, 16.78, 22.30, 27.96, 34.95, 42.18, 50.11, 58.17, 68.25, 77.93, 88.81, 101.19, 114.19, 117.43],
+    "_notes": "Full sweep from MAD's own AM160 4.5KV power-system-kit test bench data (SineSic 100A Pro ESC + FLUXER PRO 78x30 prop, tested at 800V). Source: mad-motor.com/products/am160-45kv-heavy-lift-power-system-kit. 100% thrust (258.3kgf) matches the 258kgf peak-thrust spec."
+  }
+]

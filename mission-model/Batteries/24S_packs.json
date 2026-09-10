@@ -1,0 +1,58 @@
+[
+  {
+    "name": "YANGDA_XTurbo_24S_44Ah",
+    "mass_g": 12830,
+    "capacity_mah": 44000,
+    "cost_usd": 3900,
+    "cells_s": 24
+  },
+  {
+    "name": "TATTU_NEO_24S_30Ah",
+    "mass_g": 17000,
+    "capacity_mah": 30000,
+    "cost_usd": 2834.49,
+    "cells_s": 24
+  },
+  {
+    "name": "MAD_24S_55Ah_solid_state",
+    "mass_g": 16668,
+    "capacity_mah": 55000,
+    "cost_usd": 4686,
+    "cells_s": 24
+  },
+  {
+    "name": "MAD_24S_100Ah_solid_state",
+    "mass_g": 30305,
+    "capacity_mah": 100000,
+    "cost_usd": 8520.00,
+    "cells_s": 24
+  },
+  {
+    "name": "12Sx2_series_24S_66Ah",
+    "mass_g": 21400,
+    "capacity_mah": 66000,
+    "cost_usd": 5926.80,
+    "cells_s": 24
+  },
+  {
+    "name": "12Sx4_2P2S_24S_132Ah",
+    "mass_g": 42800,
+    "capacity_mah": 132000,
+    "cost_usd": 11853.60,
+    "cells_s": 24
+  },
+  {
+    "name": "Farasis_24S1P_53Ah",
+    "mass_g": 21701,
+    "capacity_mah": 53000,
+    "cost_usd": 432.00,
+    "cells_s": 24
+  },
+  {
+    "name": "Farasis_24S2P_106Ah",
+    "mass_g": 43402,
+    "capacity_mah": 106000,
+    "cost_usd": 864.00,
+    "cells_s": 24
+  }
+]
