@@ -1,0 +1,16 @@
+[
+  {
+    "motor_model": "HOBBYWING_X11_PLUS",
+    "prop_diameter_in": 43,
+    "motor_mass_g": 2063,
+    "prop_mass_g": 427,
+    "motor_cost": null,
+    "prop_cost": 90.00,
+    "cells_s": 14,
+    "throttle_pct": [33, 35, 37, 39, 42, 45, 48, 51, 54, 57, 60, 63, 66, 69, 72, 75, 78, 81, 84, 87, 90, 100],
+    "thrust_g": [7175, 7885, 8965, 9740, 10875, 12680, 14000, 15300, 17305, 18715, 19810, 21560, 23030, 24795, 26215, 27825, 29535, 30945, 31435, 33235, 34920, 37670],
+    "current_a": [11.3, 13.1, 15.9, 18.0, 21.2, 26.6, 30.9, 35.2, 42.4, 47.8, 52.1, 59.3, 65.7, 73.8, 80.5, 88.5, 97.4, 105.1, 107.8, 118.2, 128.3, 146.1],
+    "_data_source": "measured_full_curve",
+    "_notes": "Hobbywing XRotor X11 Plus agricultural power system, full measured throttle sweep at 54V/14S from the official spec table at hobbywing.com/en/products/xrotor-x11-plus270 (MFP 43x14 prop). Prop mass/price (427g incl. adapter, $90.00) from hobbywingdirect.com/products/xrotor-4314-propeller; motor_mass_g (2063g) is derived as the published total system weight (2490g, incl. cable+prop) minus the 427g prop -- Hobbywing does not publish a motor-only mass. motor_cost left null since this is sold only as a bundled system with widely varying street price ($240-410)."
+  }
+]

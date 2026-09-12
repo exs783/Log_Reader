@@ -1,0 +1,10 @@
+[
+    {
+        "name": "XOAR PJP-T-L 40x10",
+        "type": "propeller",
+        "material": "carbon_fiber",
+        "weight": 380,
+        "max_rpm_rec": 4000,
+        "Thrust_Limit": 40200
+    }
+]

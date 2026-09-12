@@ -40,3 +40,44 @@ not 24S battery motors — `cells_s` is null and `voltage_v` is given instead.
    have measured sweeps for some of these — I can dig there.
 3. **Send me any datasheet/Excel you already have** (your M50C35 example clearly
    came from one) and I'll transcribe it exactly.
+
+## 2026-09-11: four more real heavy-lift/agri motors
+
+Added `TMOTOR_P80III_KV100.json`, `TMOTOR_P80III_KV120.json`,
+`HOBBYWING_X9_PLUS.json`, `HOBBYWING_X11_PLUS.json`.
+
+- **T-Motor P80III (KV100 / KV120)** -- agricultural UAV motor, 30in G30x10.5
+  prop. Same situation as the existing T-Motor/MAD files: T-Motor's store
+  pages (store.tmotor.com/product/P80-v3-pin-kv100/kv120-p-type.html) only
+  publish a single 100%-throttle endpoint (thrust + current at that one
+  point), not a sweep. `throttle_pct: [100]` only -- **no invented
+  intermediate points**. `"_data_source": "endpoints_only"`. Motor mass
+  (649g) and price ($199.90) are real, from the same pages. Prop mass/price
+  (97g/blade, $167.95 each) are from T-Motor's separate G30x10.5 propeller
+  listing. Because this is a single-point curve, `load_motor_configs()`
+  currently skips these two entries (needs >=2 throttle points spanning
+  [40,100]%) -- they're included for completeness/future use if T-Motor ever
+  publishes a full sweep, same rationale as the existing endpoints-only
+  T-Motor/MAD files.
+
+- **Hobbywing X9 Plus / X11 Plus** -- agricultural power systems (motor +
+  ESC + prop as one SKU). Both **DO** publish a full measured throttle
+  sweep (22 points, 33-100%) directly on their product pages
+  (hobbywing.com/en/products/xrotor-x9-plus112 and .../xrotor-x11-plus270).
+  Transcribed row-for-row, nothing interpolated or invented.
+  `"_data_source": "measured_full_curve"`. These two are real, usable
+  additions to the model (cells_s=14, real masses) -- verified they load and
+  interpolate correctly via `load_motor_configs()`.
+
+  Honesty caveat on mass: Hobbywing only publishes **total system weight**
+  (motor+ESC+cable+prop together), not motor-only mass. Where the prop mass
+  was separately published (X9 Plus: 242g stated on the spec page; X11 Plus:
+  427g from Hobbywing's standalone 4314-propeller listing), `motor_mass_g`
+  here is **derived** as (published total system weight) minus (published
+  prop mass) -- a plain subtraction of two real numbers, not a fabricated
+  or modeled value, but flagged here since it's not itself a number
+  Hobbywing prints directly. `motor_cost` is left `null` for both: these
+  only sell as a bundled combo and street price varies a lot by
+  retailer/region ($180-350 for X9 Plus, $240-410 for X11 Plus); X9 Plus's
+  `prop_cost` is left `null` for the same reason, X11 Plus's prop_cost
+  ($90.00) came from Hobbywing's separate propeller SKU.

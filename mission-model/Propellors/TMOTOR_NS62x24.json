@@ -1,0 +1,10 @@
+[
+    {
+        "name": "T-Motor NS62x24",
+        "type": "propeller",
+        "material": "carbon_fiber",
+        "weight": 1840,
+        "max_rpm_rec": null,
+        "Thrust_Limit": null
+    }
+]

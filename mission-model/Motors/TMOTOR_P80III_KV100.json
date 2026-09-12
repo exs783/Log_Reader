@@ -1,0 +1,16 @@
+[
+  {
+    "motor_model": "TMOTOR_P80III_KV100",
+    "prop_diameter_in": 30,
+    "motor_mass_g": 649,
+    "prop_mass_g": 97,
+    "motor_cost": 199.90,
+    "prop_cost": 167.95,
+    "cells_s": 12,
+    "throttle_pct": [100],
+    "thrust_g": [14011],
+    "current_a": [46.99],
+    "_data_source": "endpoints_only",
+    "_notes": "T-Motor P80III KV100 agricultural UAV motor, store.tmotor.com/product/P80-v3-pin-kv100-p-type.html: motor 649g (incl. cable), $199.90; only a single 100%-throttle endpoint is published (G30x10.5 CF prop, 47.15V/~12S: 14011g thrust, 46.99A), no full sweep. Prop mass/price from store.tmotor.com's G30x10.5 pair listing (97g single-blade weight, $335.90/pair -> $167.95 each)."
+  }
+]

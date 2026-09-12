@@ -54,5 +54,82 @@
     "capacity_mah": 106000,
     "cost_usd": 864.00,
     "cells_s": 24
+  },
+  {
+    "name": "ZYE_UltraHV_24S_66Ah",
+    "mass_g": 21000,
+    "capacity_mah": 66000,
+    "cost_usd": 1249.00,
+    "cells_s": 24
+  },
+  {
+    "name": "Grepow_TARBG_24S_30Ah",
+    "mass_g": 9345,
+    "capacity_mah": 30000,
+    "cost_usd": 2651.39,
+    "cells_s": 24
+  },
+  {
+    "name": "Amprius_SA08_24S1P_11Ah",
+    "mass_g": 2700,
+    "capacity_mah": 11050,
+    "cost_usd": 2320.00,
+    "cells_s": 24
+  },
+  {
+    "name": "Amprius_SA08_24S2P_22Ah",
+    "mass_g": 5400,
+    "capacity_mah": 22100,
+    "cost_usd": 4640.00,
+    "cells_s": 24
+  },
+  {
+    "name": "Amprius_SA88_24S1P_10Ah",
+    "mass_g": 2447,
+    "capacity_mah": 10500,
+    "cost_usd": 972.00,
+    "cells_s": 24
+  },
+  {
+    "name": "Amprius_SA88_24S2P_21Ah",
+    "mass_g": 4893,
+    "capacity_mah": 21000,
+    "cost_usd": 1944.00,
+    "cells_s": 24
+  },
+  {
+    "name": "Grepow_NMC811_24S1P_87Ah",
+    "mass_g": 22421,
+    "capacity_mah": 87000,
+    "cost_usd": 7689.06,
+    "cells_s": 24
+  },
+  {
+    "name": "Grepow_NMC811_24S2P_24Ah",
+    "mass_g": 6532,
+    "capacity_mah": 24000,
+    "cost_usd": 2121.12,
+    "cells_s": 24
+  },
+  {
+    "name": "Amprius_SA88_24S4P_42Ah",
+    "mass_g": 9788,
+    "capacity_mah": 42000,
+    "cost_usd": 3888.00,
+    "cells_s": 24
+  },
+  {
+    "name": "Amprius_SA88_24S6P_63Ah",
+    "mass_g": 14682,
+    "capacity_mah": 63000,
+    "cost_usd": 5832.00,
+    "cells_s": 24
+  },
+  {
+    "name": "Grepow_NMC811_small_24S4P_48Ah",
+    "mass_g": 13064,
+    "capacity_mah": 48000,
+    "cost_usd": 4242.24,
+    "cells_s": 24
   }
 ]
