@@ -1,80 +1,80 @@
 [
   {
-    "name": "TailSitter_Contra_Compact",
+    "name": "TailSitter_Contra_Compact_OptWing",
     "num_rotors": 2,
-    "base_mass_g": 16000,
+    "base_mass_g": 14752.3,
     "arm_mass_g": 3000,
     "drag_cd": 0.35,
     "wing_area_m2": 2.84,
     "wing_cl": 0.55
   },
   {
-    "name": "TailSitter_Contra_Balanced",
+    "name": "TailSitter_Contra_Balanced_OptWing",
     "num_rotors": 2,
-    "base_mass_g": 17500,
+    "base_mass_g": 15764.6,
     "arm_mass_g": 3000,
     "drag_cd": 0.35,
     "wing_area_m2": 3.95,
-    "wing_cl": 0.60
+    "wing_cl": 0.6
   },
   {
-    "name": "TailSitter_Contra_Big",
+    "name": "TailSitter_Contra_Big_OptWing",
     "num_rotors": 2,
-    "base_mass_g": 19000,
+    "base_mass_g": 16763.8,
     "arm_mass_g": 3000,
     "drag_cd": 0.35,
     "wing_area_m2": 5.09,
     "wing_cl": 0.65
   },
   {
-    "name": "TailSitter_Quad_Compact",
+    "name": "TailSitter_Quad_Compact_OptWing",
     "num_rotors": 4,
-    "base_mass_g": 16000,
+    "base_mass_g": 14752.3,
     "arm_mass_g": 5500,
     "drag_cd": 0.35,
     "wing_area_m2": 2.84,
     "wing_cl": 0.55
   },
   {
-    "name": "TailSitter_Quad_Balanced",
+    "name": "TailSitter_Quad_Balanced_OptWing",
     "num_rotors": 4,
-    "base_mass_g": 17500,
+    "base_mass_g": 15764.6,
     "arm_mass_g": 5500,
     "drag_cd": 0.35,
     "wing_area_m2": 3.95,
-    "wing_cl": 0.60
+    "wing_cl": 0.6
   },
   {
-    "name": "TailSitter_Quad_Big",
+    "name": "TailSitter_Quad_Big_OptWing",
     "num_rotors": 4,
-    "base_mass_g": 19000,
+    "base_mass_g": 16763.8,
     "arm_mass_g": 5500,
     "drag_cd": 0.35,
     "wing_area_m2": 5.09,
     "wing_cl": 0.65
   },
   {
-    "name": "TailSitter_Bicopter_Compact",
+    "name": "TailSitter_Bicopter_Compact_OptWing",
     "num_rotors": 2,
-    "base_mass_g": 16000,
+    "base_mass_g": 14752.3,
     "arm_mass_g": 3500,
     "drag_cd": 0.35,
     "wing_area_m2": 2.84,
     "wing_cl": 0.55
   },
   {
-    "name": "TailSitter_Bicopter_Balanced",
+    "name": "TailSitter_Bicopter_Balanced_OptWing",
     "num_rotors": 2,
-    "base_mass_g": 17500,
+    "base_mass_g": 15764.6,
     "arm_mass_g": 3500,
     "drag_cd": 0.35,
     "wing_area_m2": 3.95,
-    "wing_cl": 0.60
+    "wing_cl": 0.6
   },
   {
-    "name": "TailSitter_Bicopter_Big",
+    "name": "TailSitter_Bicopter_Big_OptWing",
     "num_rotors": 2,
-    "base_mass_g": 19000,
+    "base_mass_g": 16763.8,
     "arm_mass_g": 3500,
     "drag_cd": 0.35,
     "wing_area_m2": 5.09,

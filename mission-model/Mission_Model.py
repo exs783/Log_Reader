@@ -55,10 +55,19 @@ Changes vs. the MATLAB original (see inline notes at each site):
     the original).
   - VehicleType gained arm_mass_g (a flat extra structural mass, independent
     of prop size -- distinct from arm_extra_mass_per_in, which is the
-    *additional* mass for oversized props) and cruise_velocity_mps (an
-    airframe can target a forward cruise speed other than the inherited
-    10 m/s default -- a fixed-wing-ish hybrid is typically designed around
-    a much faster cruise point than a hovering multirotor).
+    *additional* mass for oversized props).
+  - Cruise speed is no longer a prescribed target (the original's fixed
+    10 m/s). Each leg accelerates to the steady speed where drag balances
+    the horizontal thrust the chosen throttle actually leaves over (capped
+    at VehicleType.max_speed_mps, an airspeed governor -- the bare
+    thrust/drag balance alone comes out unrealistically high for this
+    model's small frontal areas), holds it, then coasts down -- so speed
+    is an output of the throttle, and the per-leg throttle search (minimum
+    energy) is what "fly it as efficiently as possible" now means. Decel
+    back down to the 1 m/s landing-approach floor is likewise powered
+    braking (rotors tilted the other way) instead of an unpowered drag-only
+    coast -- the coast's decay time scaled as 1/kk, so a lower-drag vehicle
+    took *longer* to finish a leg, which a braking VTOL doesn't have to.
   - The motor-config folder, vehicle types, and batteries are all run-time
     inputs now rather than hard-coded: pass --data-dir/--vehicle-file/
     --battery-file, or leave them off and the script prompts for each
@@ -106,7 +115,20 @@ RHO_AIR = 1.225  # kg/m^3
 
 THROTTLE_MIN, THROTTLE_MAX = 40.0, 100.0
 
-TARGET_CRUISE_VELOCITY_MPS = 10.0  # inherited from the original model, unchanged
+# Cruise speed isn't prescribed: each leg is flown at whatever steady speed
+# the chosen throttle settles at, and the throttle search picks the setting
+# that covers the leg for the least energy. The accel phase ends this close
+# to that equilibrium (reaching it exactly takes infinite time).
+CRUISE_V_FRACTION = 0.995
+
+# Airspeed governor: real airframes don't fly at whatever speed their thrust
+# happens to equilibrate at (that number comes out triple digits for this
+# model's small frontal areas -- unrealistic). 18 m/s (~35 kt) is a
+# reasonable cruise cap for a heavy-lift cargo VTOL in this weight class;
+# override per-airframe via VehicleType.max_speed_mps if a given design is
+# rated faster or slower.
+DEFAULT_MAX_SPEED_MPS = 18.0
+
 TARGET_TAKEOFF_ALTITUDE_M = 30.48  # 100 ft
 
 LANDING_START_ALT_M = 30.48  # 100 ft, matches the new takeoff altitude
@@ -216,7 +238,7 @@ class VehicleType:
     drag_cd: float = 1.28
     wing_area_m2: float = 0.0  # 0 = no wings
     wing_cl: float = 0.0  # lift coefficient at cruise attitude; ignored if wing_area_m2 is 0
-    cruise_velocity_mps: float = TARGET_CRUISE_VELOCITY_MPS  # target forward cruise speed for this airframe
+    max_speed_mps: float = DEFAULT_MAX_SPEED_MPS  # airspeed governor -- see constant's comment
 
 
 # Reproduces the original MATLAB model's single hard-coded airframe.
@@ -241,7 +263,7 @@ def load_vehicle_types(path: str) -> list[VehicleType]:
         [
           {"name": "Multirotor-6", "num_rotors": 6, "base_mass_g": 4500},
           {"name": "Hybrid-VTOL", "num_rotors": 4, "base_mass_g": 5200,
-           "wing_area_m2": 1.2, "wing_cl": 0.9, "cruise_velocity_mps": 26}
+           "wing_area_m2": 1.2, "wing_cl": 0.9}
         ]
     Only name/num_rotors/base_mass_g are required; everything else falls
     back to VehicleType's defaults (wingless, standard drag/arm constants).
@@ -470,6 +492,28 @@ def _effective_area_at(thrust_n: float, weight_n: float, base_area_m2: float, li
     return base_area_m2 * (thrust_n / thrust_horizontal_n)
 
 
+def _equilibrium_velocity(thrust_n: float, weight_n: float, base_area_m2: float, cd: float, lift_fn) -> float:
+    """Steady forward speed a throttle setting settles at: drag equals the
+    horizontal thrust left over after supporting (weight - wing lift).
+    Returns 0.0 if the vehicle can't hold itself up and push at all."""
+    def excess_thrust(v: float) -> float:
+        effective_weight_n = max(weight_n - lift_fn(v), 0.0)
+        thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - effective_weight_n * effective_weight_n, 0.0))
+        area = base_area_m2 * (thrust_n / thrust_horizontal_n) if thrust_horizontal_n > 0 else base_area_m2
+        return thrust_horizontal_n - 0.5 * RHO_AIR * cd * area * v * v
+
+    if excess_thrust(0.0) <= 0:
+        return 0.0
+    # At v_hi, drag on the *un*-inflated area alone already exceeds full
+    # thrust, and the real drag area is >= that while thrust_horizontal is
+    # <= thrust_n -- so excess is negative there for any lift_fn. (The 1.05
+    # is what makes it strictly negative rather than exactly zero in the
+    # fully-winged case, where lift carries all the weight and the area
+    # isn't inflated at all.)
+    v_hi = 1.05 * math.sqrt(2 * thrust_n / (RHO_AIR * cd * base_area_m2))
+    return brentq(excess_thrust, 0.0, v_hi)
+
+
 def _log_cosh(x: float) -> float:
     """log(cosh(x)) without the overflow cosh(x) itself hits once |x| passes
     ~710 -- log1p(exp(-2|x|)) stays in [0, log 2] for every x, so this is
@@ -591,6 +635,43 @@ def _decel_phase(kk: float, v0: float, v_floor: float, distance_cap: float):
     return t, x, v
 
 
+def _decel_phase_powered(a0: float, kk: float, v0: float, v_floor: float, distance_cap: float):
+    """Closed-form solve of dv/dt = -(a0 + kk*v^2): braking thrust plus drag,
+    both decelerating (mirror of the accel phase's a0 - kk*v^2, thrust now
+    pointed the other way). Stops at v reaching v_floor or distance reaching
+    distance_cap.
+
+    Replaces flying the decel leg as a pure unpowered coast (_decel_phase
+    above): a VTOL can brake with its rotors, and coasting on drag alone had
+    no floor on how long the tail takes -- both the time and distance to
+    reach v_floor scale as 1/kk, so a LOWER-drag vehicle took LONGER to
+    finish a leg, backwards for a model whose whole point is now "as
+    efficient as possible". a0 here comes from the same thrust magnitude
+    used to reach cruise speed, tilted the other way, so a wingless vehicle
+    decelerates exactly as fast as it accelerated."""
+    if v0 <= v_floor:
+        return 0.0, 0.0, v0
+    if a0 <= 0:
+        return _decel_phase(kk, v0, v_floor, distance_cap)  # no braking thrust available -- fall back to coasting
+
+    if kk <= 0:
+        x_floor = (v0 * v0 - v_floor * v_floor) / (2 * a0)
+        if x_floor <= distance_cap:
+            return (v0 - v_floor) / a0, x_floor, v_floor
+        v = math.sqrt(v0 * v0 - 2 * a0 * distance_cap)
+        return (v0 - v) / a0, distance_cap, v
+
+    b = math.sqrt(a0 / kk)
+    x_floor = math.log((a0 + kk * v0 * v0) / (a0 + kk * v_floor * v_floor)) / (2 * kk)
+    if x_floor <= distance_cap:
+        t_floor = (math.atan(v0 / b) - math.atan(v_floor / b)) / (kk * b)
+        return t_floor, x_floor, v_floor
+
+    v = math.sqrt(max((a0 + kk * v0 * v0) * math.exp(-2 * kk * distance_cap) - a0, 0.0) / kk)
+    t = (math.atan(v0 / b) - math.atan(v / b)) / (kk * b)
+    return t, distance_cap, v
+
+
 # ---------------------------------------------------------------------------
 # Hover time
 # ---------------------------------------------------------------------------
@@ -646,27 +727,33 @@ def segment(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery,
     has_wing = vehicle.wing_area_m2 > 0
     lift_fn = (lambda v: wing_lift_n(vehicle, v)) if has_wing else (lambda _v: 0.0)
 
+    v_eq = _equilibrium_velocity(thrust_n, weight_n, base_area, vehicle.drag_cd, lift_fn)
+    if v_eq <= 1.0:  # can't out-accelerate its own drag past the 1 m/s start
+        return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+    # Governed: capped at max_speed_mps even if drag alone would equilibrate
+    # higher (real aircraft don't fly at whatever a bare thrust/drag balance
+    # says -- there's a structural/control-authority/regulatory speed limit).
+    v_target = min(CRUISE_V_FRACTION * v_eq, vehicle.max_speed_mps)
+
     accel = _accel_phase(thrust_n, weight_n, base_area, vehicle.drag_cd, mass_kg, lift_fn, has_wing,
-                          v0=1.0, v_target=vehicle.cruise_velocity_mps, distance_cap=distance_m / 2)
+                          v0=1.0, v_target=v_target, distance_cap=distance_m / 2)
     if accel is None:
         return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
     t_acc, x_acc, v_cruise = accel
 
-    # Coast/decel is unpowered drag only; use the tilt-area as of hand-off
-    # speed (equals the constant accel-phase area when there's no wing).
-    # Note: this decel phase's average speed while decaying from v_cruise
-    # down to the 1 m/s floor is independent of drag by construction (both
-    # its distance and duration scale as 1/kk, so their ratio doesn't), so
-    # less drag here doesn't cover more ground -- it just stretches the
-    # slow tail. That can make a lower-drag (e.g. winged) vehicle spend
-    # more of the leg at this phase's low average speed, not less.
+    # Decel is powered braking (rotors tilted the other way), not a coast:
+    # use the tilt-area and forward-thrust magnitude as of hand-off speed
+    # (both equal the constant accel-phase values when there's no wing).
     decel_area = _effective_area_at(thrust_n, weight_n, base_area, lift_fn, v_cruise)
     kk_decel = 0.5 * RHO_AIR * vehicle.drag_cd * decel_area / mass_kg
-    t_dec, x_dec, _v_end = _decel_phase(kk_decel, v_cruise, v_floor=1.0, distance_cap=distance_m / 2)
+    effective_weight_cruise_n = max(weight_n - lift_fn(v_cruise), 0.0)
+    thrust_horizontal_decel_n = math.sqrt(max(thrust_n * thrust_n - effective_weight_cruise_n * effective_weight_cruise_n, 0.0))
+    a0_decel = thrust_horizontal_decel_n / mass_kg
+    t_dec, x_dec, _v_end = _decel_phase_powered(a0_decel, kk_decel, v_cruise, v_floor=1.0, distance_cap=distance_m / 2)
 
     # Energy uses the cruise-throttle current for both phases, matching the
     # original's assumption that throttle (and so current draw) is held
-    # constant rather than reduced while coasting down.
+    # constant rather than reduced while braking down.
     energy_mah = amps_ma * ((t_acc + t_dec) / 3600.0)
 
     if x_acc + x_dec >= distance_m:
@@ -891,23 +978,56 @@ def plot_results(df: pd.DataFrame, out_prefix: str | None):
     ax2.axhline(0, color="#898781", linewidth=0.8)
     fig2.tight_layout()
 
-    fig3, ax3 = plt.subplots(figsize=(7, 6))
-    for feasible, color, label in [(True, GOOD_COLOR, "Feasible"), (False, CRITICAL_COLOR, "Infeasible")]:
-        sub = df[df.mission_feasible == feasible]
-        ax3.scatter(sub.total_mass_g / 1000.0, sub.hover_time_min, color=color, label=label, s=25, alpha=0.7)
-    ax3.set_title(f"Hover Time vs Total Mass (all {len(df)} configurations)")
-    ax3.set_xlabel("Total Mass (kg)")
-    ax3.set_ylabel("Hover Time (minutes)")
-    ax3.legend()
-    ax3.grid(True, color="#e1e0d9")
-    fig3.tight_layout()
+    import plotly.graph_objects as go
+
+    # Each view is (title, x-column-expr, y-column-expr, z-column-expr, axis titles).
+    # Buttons restyle x/y/z on the existing traces instead of rebuilding the figure.
+    views = [
+        ("Mass / Energy / Hover", lambda d: d.total_mass_g / 1000.0, lambda d: d.mission_total_energy_mah,
+         lambda d: d.hover_time_min, "Total Mass (kg)", "Mission Energy (mAh)", "Hover Time (minutes)"),
+        ("Mass / Hover / Cost", lambda d: d.total_mass_g / 1000.0, lambda d: d.hover_time_min,
+         lambda d: d.total_cost_usd, "Total Mass (kg)", "Hover Time (minutes)", "Total Cost (USD)"),
+        ("Energy / Hover / Cost", lambda d: d.mission_total_energy_mah, lambda d: d.hover_time_min,
+         lambda d: d.total_cost_usd, "Mission Energy (mAh)", "Hover Time (minutes)", "Total Cost (USD)"),
+    ]
+    splits = [(True, GOOD_COLOR, "Feasible"), (False, CRITICAL_COLOR, "Infeasible")]
+    subs = [df[df.mission_feasible == feasible] for feasible, _, _ in splits]
+
+    fig3 = go.Figure()
+    for sub, (_, color, label) in zip(subs, splits):
+        title, xf, yf, zf, *_ = views[0]
+        fig3.add_trace(go.Scatter3d(
+            x=xf(sub), y=yf(sub), z=zf(sub),
+            mode="markers", name=label,
+            marker=dict(size=4, color=color, opacity=0.7),
+            customdata=sub[["vehicle", "motor_model", "battery"]].values,
+            hovertemplate="%{customdata[0]}<br>%{customdata[1]} / %{customdata[2]}"
+                          "<br>x=%{x:.2f}  y=%{y:.2f}  z=%{z:.2f}<extra></extra>",
+        ))
+
+    buttons = []
+    for title, xf, yf, zf, xlabel, ylabel, zlabel in views:
+        buttons.append(dict(
+            label=title, method="update",
+            args=[
+                {"x": [xf(sub) for sub in subs], "y": [yf(sub) for sub in subs], "z": [zf(sub) for sub in subs]},
+                {"title": f"{title} (all {len(df)} configurations)",
+                 "scene.xaxis.title": xlabel, "scene.yaxis.title": ylabel, "scene.zaxis.title": zlabel},
+            ],
+        ))
+    fig3.update_layout(
+        title=f"{views[0][0]} (all {len(df)} configurations)",
+        scene=dict(xaxis_title=views[0][4], yaxis_title=views[0][5], zaxis_title=views[0][6]),
+        updatemenus=[dict(buttons=buttons, active=0, x=0.02, y=1.08, xanchor="left", showactive=True)],
+    )
 
     if out_prefix:
         fig1.savefig(f"{out_prefix}_best_hover_by_vehicle.png", bbox_inches="tight", dpi=150)
         fig2.savefig(f"{out_prefix}_best_energy_margin_by_vehicle.png", bbox_inches="tight", dpi=150)
-        fig3.savefig(f"{out_prefix}_hover_vs_mass_tradespace.png", bbox_inches="tight", dpi=150)
+        fig3.write_html(f"{out_prefix}_hover_vs_mass_tradespace.html")
     else:
         plt.show()
+        fig3.show()
 
 
 def _prompt(message: str, default: str = "") -> str:

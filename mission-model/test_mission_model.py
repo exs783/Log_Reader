@@ -1,5 +1,6 @@
 """Self-check for Mission Model.py. Run: python test_mission_model.py"""
 
+import dataclasses
 import importlib.util
 import math
 import os
@@ -114,13 +115,10 @@ def test_extra_payload_increases_segment_energy():
 def test_wings_reduce_required_tilt_and_speed_up_accel():
     """Wing lift should offload weight-support so the same throttle produces
     more usable horizontal thrust (smaller tilt-inflated drag area, faster
-    acceleration) than an otherwise-identical wingless vehicle. (Total
-    segment energy isn't a reliable proxy for this: this model's decel
-    phase decays down to a fixed 1 m/s floor, and its average speed during
-    that decay is independent of drag by construction -- less drag just
-    stretches the slow tail rather than covering proportionally more
-    ground, which can outweigh the accel-phase gain. That's inherited from
-    the original decel formulation, not specific to wings.)"""
+    acceleration) than an otherwise-identical wingless vehicle. Checked
+    directly against the accel-phase helpers rather than via segment()'s
+    total time/energy, which also folds in decel and cruise-speed effects
+    that aren't this test's concern."""
     cfg = make_cfg(thrust_at_100=3000.0, current_at_100=25.0)
     winged = mm.VehicleType(
         name="winged", num_rotors=mm.MULTIROTOR.num_rotors, base_mass_g=mm.MULTIROTOR.base_mass_g,
@@ -384,6 +382,66 @@ def test_run_skips_voltage_mismatched_battery_pairs():
         df2 = mm.run(tmp_dir, grid_step=5.0, batteries=mixed)
         assert len(df2) == 1
         assert df2.iloc[0]["battery"] == "6S-pack"
+
+
+def test_equilibrium_velocity_is_where_drag_balances_horizontal_thrust():
+    """The cruise speed is no longer prescribed -- it's the root of
+    thrust_horizontal(v) = drag(v). Check both the wingless closed-form case
+    and the winged one, by evaluating the balance at the returned speed."""
+    for lift_fn, thrust_n in (((lambda _v: 0.0), 4000.0), ((lambda v: 0.5 * mm.RHO_AIR * 0.9 * 1.2 * v * v), 2000.0)):
+        weight_n = 1500.0
+        area, cd = 0.4, 1.0
+        v_eq = mm._equilibrium_velocity(thrust_n, weight_n, area, cd, lift_fn)
+        assert v_eq > 0
+        effective_weight_n = max(weight_n - lift_fn(v_eq), 0.0)
+        thrust_h = math.sqrt(thrust_n ** 2 - effective_weight_n ** 2)
+        drag = 0.5 * mm.RHO_AIR * cd * area * (thrust_n / thrust_h) * v_eq ** 2
+        assert math.isclose(thrust_h, drag, rel_tol=1e-6)
+
+    # Can't even lift itself: no forward speed, and the leg is infeasible.
+    assert mm._equilibrium_velocity(1000.0, 1500.0, 0.4, 1.0, lambda _v: 0.0) == 0.0
+
+
+def test_cruise_speed_is_capped_at_max_speed_mps():
+    """A vehicle with plenty of thrust to spare (equilibrium speed well
+    above the governor) should cruise at max_speed_mps, not its bare
+    thrust/drag equilibrium."""
+    cfg = make_cfg(thrust_at_100=6000.0, current_at_100=25.0)  # overpowered -> high v_eq
+    fast_governed = dataclasses.replace(mm.MULTIROTOR, max_speed_mps=15.0)
+    t, _e = mm.segment(fast_governed, cfg, BATTERY, throttle_pct=100.0, distance_m=3000.0)
+    # Below governor, hover mass ~120 kg dominates the leg at 15 m/s:
+    # 3000 m at (up to) 15 m/s takes at least 200 s.
+    assert t >= 200.0
+
+    uncapped = dataclasses.replace(mm.MULTIROTOR, max_speed_mps=1000.0)
+    t_uncapped, _e2 = mm.segment(uncapped, cfg, BATTERY, throttle_pct=100.0, distance_m=3000.0)
+    assert t_uncapped < t  # same vehicle, no governor -> faster
+
+
+def test_decel_is_powered_so_less_drag_never_makes_a_leg_slower():
+    """Regression: with the old unpowered-coast decel, both the distance and
+    time to decay from cruise speed down to the 1 m/s floor scaled as 1/kk,
+    so a LOWER-drag vehicle took LONGER to finish a leg -- backwards for a
+    model whose whole point is flying it as efficiently as possible. Braking
+    with the rotors instead of coasting on drag should make leg time
+    monotonically non-increasing as drag drops."""
+    cfg = make_cfg(thrust_at_100=3000.0, current_at_100=25.0)
+    times = []
+    for cd in (1.28, 0.5, 0.1):
+        v = dataclasses.replace(mm.MULTIROTOR, drag_cd=cd, max_speed_mps=1000.0)  # ungoverned
+        t, _e = mm.segment(v, cfg, BATTERY, throttle_pct=80.0, distance_m=2000.0)
+        times.append(t)
+    assert times[0] > times[1] > times[2], times
+
+
+def test_leg_is_no_longer_flown_at_the_old_fixed_10_mps_target():
+    """A vehicle with thrust to spare now cruises at its own equilibrium
+    speed, so it covers the leg faster than the retired 10 m/s target
+    would have (2000 m / 10 m/s = 200 s, before takeoff/landing)."""
+    cfg = make_cfg(thrust_at_100=3000.0, current_at_100=25.0)
+    t, _e = mm.segment(mm.MULTIROTOR, cfg, BATTERY, throttle_pct=80.0, distance_m=2000.0)
+    assert t < 200.0
+    assert not hasattr(mm.MULTIROTOR, "cruise_velocity_mps")
 
 
 if __name__ == "__main__":
