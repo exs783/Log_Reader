@@ -257,6 +257,19 @@ class VehicleType:
     wing_area_m2: float = 0.0  # 0 = no wings
     wing_cl: float = 0.0  # lift coefficient at cruise attitude; ignored if wing_area_m2 is 0
     max_speed_mps: float = DEFAULT_MAX_SPEED_MPS  # airspeed governor -- see constant's comment
+    # Zero-lift ("parasite") drag coefficient, referenced to wing_area_m2 --
+    # the standard fixed-wing-aircraft convention (unlike drag_cd, which is
+    # referenced to the prop/frame frontal area -- see parasite_drag_area_m2()
+    # for how the two get combined). Covers the wing's own skin-friction and
+    # form drag at cruise attitude, which the frontal-area model has no other
+    # way to represent (that model's "effective area" only grows with tilt,
+    # so a winged vehicle flying near-level at cruise -- most of its weight
+    # supported by wing lift, not thrust -- got essentially the bare prop
+    # frontal area and nothing for the wing itself). 0.045 is mid-range for
+    # a light, somewhat-draggy UAV airframe (clean sailplanes run ~0.02,
+    # draggy UAVs with exposed motor pods/struts run ~0.06); ignored when
+    # wing_area_m2 is 0.
+    parasite_cd0: float = 0.045
 
 
 # Reproduces the original MATLAB model's single hard-coded airframe.
@@ -499,35 +512,51 @@ def wing_lift_n(vehicle: VehicleType, velocity_mps: float) -> float:
     return 0.5 * RHO_AIR * vehicle.wing_cl * vehicle.wing_area_m2 * velocity_mps * velocity_mps
 
 
-def _effective_area_at(thrust_n: float, weight_n: float, base_area_m2: float, lift_fn, v: float) -> float:
+def parasite_drag_area_m2(vehicle: VehicleType) -> float:
+    """The wing's zero-lift drag (parasite_cd0 * wing_area_m2, the real
+    physical parasite drag force at a given v) re-expressed as an
+    *equivalent area at vehicle.drag_cd* -- dividing by drag_cd converts it
+    into the same units _effective_area_at()'s tilt-inflated frontal area is
+    already in, so the two can just be added together and multiplied by the
+    one shared drag_cd everywhere that already happens (kk = 0.5*rho*cd*
+    area/mass, in several places). Zero whenever wing_area_m2 is 0."""
+    return vehicle.parasite_cd0 * vehicle.wing_area_m2 / vehicle.drag_cd
+
+
+def _effective_area_at(thrust_n: float, weight_n: float, base_area_m2: float, lift_fn, v: float,
+                        parasite_area_m2: float = 0.0) -> float:
     """Frontal area inflated by the forward tilt needed to support
     (weight - wing lift) at this velocity, i.e. how much of total thrust
-    magnitude is left over to push horizontally."""
+    magnitude is left over to push horizontally -- plus a fixed parasite-drag
+    area (see parasite_drag_area_m2()) that doesn't scale with tilt the way
+    the prop/frame frontal area does, since it's the wing's own drag, not
+    the rotors'."""
     effective_weight_n = max(weight_n - lift_fn(v), 0.0)
     thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - effective_weight_n * effective_weight_n, 0.0))
-    if thrust_horizontal_n <= 0:
-        return base_area_m2
-    return base_area_m2 * (thrust_n / thrust_horizontal_n)
+    tilt_area = base_area_m2 * (thrust_n / thrust_horizontal_n) if thrust_horizontal_n > 0 else base_area_m2
+    return tilt_area + parasite_area_m2
 
 
-def _equilibrium_velocity(thrust_n: float, weight_n: float, base_area_m2: float, cd: float, lift_fn) -> float:
+def _equilibrium_velocity(thrust_n: float, weight_n: float, base_area_m2: float, cd: float, lift_fn,
+                           parasite_area_m2: float = 0.0) -> float:
     """Steady forward speed a throttle setting settles at: drag equals the
     horizontal thrust left over after supporting (weight - wing lift).
     Returns 0.0 if the vehicle can't hold itself up and push at all."""
     def excess_thrust(v: float) -> float:
+        area = _effective_area_at(thrust_n, weight_n, base_area_m2, lift_fn, v, parasite_area_m2)
         effective_weight_n = max(weight_n - lift_fn(v), 0.0)
         thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - effective_weight_n * effective_weight_n, 0.0))
-        area = base_area_m2 * (thrust_n / thrust_horizontal_n) if thrust_horizontal_n > 0 else base_area_m2
         return thrust_horizontal_n - 0.5 * RHO_AIR * cd * area * v * v
 
     if excess_thrust(0.0) <= 0:
         return 0.0
-    # At v_hi, drag on the *un*-inflated area alone already exceeds full
-    # thrust, and the real drag area is >= that while thrust_horizontal is
-    # <= thrust_n -- so excess is negative there for any lift_fn. (The 1.05
-    # is what makes it strictly negative rather than exactly zero in the
-    # fully-winged case, where lift carries all the weight and the area
-    # isn't inflated at all.)
+    # At v_hi, drag on the *un*-inflated, no-parasite area alone already
+    # exceeds full thrust, and the real drag area (tilt-inflated, plus any
+    # parasite term) is only ever >= that while thrust_horizontal is <=
+    # thrust_n -- so excess is negative there for any lift_fn/parasite_area.
+    # (The 1.05 is what makes it strictly negative rather than exactly zero
+    # in the fully-winged, zero-parasite case, where lift carries all the
+    # weight and the area isn't inflated at all.)
     v_hi = 1.05 * math.sqrt(2 * thrust_n / (RHO_AIR * cd * base_area_m2))
     return brentq(excess_thrust, 0.0, v_hi)
 
@@ -580,7 +609,8 @@ def _accel_phase_closed_form(a0: float, kk: float, v0: float, v_target: float, d
 
 
 def _accel_phase_numeric(thrust_n: float, weight_n: float, base_area_m2: float, cd: float,
-                          mass_kg: float, lift_fn, v0: float, v_target: float, distance_cap: float):
+                          mass_kg: float, lift_fn, v0: float, v_target: float, distance_cap: float,
+                          parasite_area_m2: float = 0.0):
     """Numeric fallback for winged vehicles: wing lift makes thrust_horizontal
     (and the tilt-inflated drag area) a function of v, so dv/dt is no longer
     the simple Riccati form the closed-form solver handles."""
@@ -590,9 +620,9 @@ def _accel_phase_numeric(thrust_n: float, weight_n: float, base_area_m2: float, 
 
     def rhs(_t, state):
         _x, v = state
+        area = _effective_area_at(thrust_n, weight_n, base_area_m2, lift_fn, v, parasite_area_m2)
         effective_weight_n = max(weight_n - lift_fn(v), 0.0)
         thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - effective_weight_n * effective_weight_n, 0.0))
-        area = base_area_m2 * (thrust_n / thrust_horizontal_n) if thrust_horizontal_n > 0 else base_area_m2
         drag_n = 0.5 * RHO_AIR * cd * area * v * v
         return [v, (thrust_horizontal_n - drag_n) / mass_kg]
 
@@ -616,8 +646,12 @@ def _accel_phase_numeric(thrust_n: float, weight_n: float, base_area_m2: float, 
 
 
 def _accel_phase(thrust_n: float, weight_n: float, base_area_m2: float, cd: float, mass_kg: float,
-                  lift_fn, has_wing: bool, v0: float, v_target: float, distance_cap: float):
+                  lift_fn, has_wing: bool, v0: float, v_target: float, distance_cap: float,
+                  parasite_area_m2: float = 0.0):
     if not has_wing:
+        # No wing means no wing drag either -- parasite_area_m2 is always 0
+        # here (parasite_drag_area_m2() zeroes it via wing_area_m2), so
+        # nothing to add to the closed-form wingless path.
         thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - weight_n * weight_n, 0.0))
         if thrust_horizontal_n <= 0:
             return None
@@ -625,7 +659,8 @@ def _accel_phase(thrust_n: float, weight_n: float, base_area_m2: float, cd: floa
         kk = 0.5 * RHO_AIR * cd * effective_area / mass_kg
         a0 = thrust_horizontal_n / mass_kg
         return _accel_phase_closed_form(a0, kk, v0, v_target, distance_cap)
-    return _accel_phase_numeric(thrust_n, weight_n, base_area_m2, cd, mass_kg, lift_fn, v0, v_target, distance_cap)
+    return _accel_phase_numeric(thrust_n, weight_n, base_area_m2, cd, mass_kg, lift_fn, v0, v_target, distance_cap,
+                                 parasite_area_m2)
 
 
 def _decel_phase(kk: float, v0: float, v_floor: float, distance_cap: float):
@@ -744,8 +779,9 @@ def segment(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery,
     base_area = frontal_area_m2(vehicle, cfg)
     has_wing = vehicle.wing_area_m2 > 0
     lift_fn = (lambda v: wing_lift_n(vehicle, v)) if has_wing else (lambda _v: 0.0)
+    parasite_area = parasite_drag_area_m2(vehicle)  # 0.0 for a wingless vehicle
 
-    v_eq = _equilibrium_velocity(thrust_n, weight_n, base_area, vehicle.drag_cd, lift_fn)
+    v_eq = _equilibrium_velocity(thrust_n, weight_n, base_area, vehicle.drag_cd, lift_fn, parasite_area)
     if v_eq <= 1.0:  # can't out-accelerate its own drag past the 1 m/s start
         return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
     # Governed: capped at max_speed_mps even if drag alone would equilibrate
@@ -754,7 +790,8 @@ def segment(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery,
     v_target = min(CRUISE_V_FRACTION * v_eq, vehicle.max_speed_mps)
 
     accel = _accel_phase(thrust_n, weight_n, base_area, vehicle.drag_cd, mass_kg, lift_fn, has_wing,
-                          v0=1.0, v_target=v_target, distance_cap=distance_m / 2)
+                          v0=1.0, v_target=v_target, distance_cap=distance_m / 2,
+                          parasite_area_m2=parasite_area)
     if accel is None:
         return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
     t_acc, x_acc, v_cruise = accel
@@ -762,7 +799,7 @@ def segment(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery,
     # Decel is powered braking (rotors tilted the other way), not a coast:
     # use the tilt-area and forward-thrust magnitude as of hand-off speed
     # (both equal the constant accel-phase values when there's no wing).
-    decel_area = _effective_area_at(thrust_n, weight_n, base_area, lift_fn, v_cruise)
+    decel_area = _effective_area_at(thrust_n, weight_n, base_area, lift_fn, v_cruise, parasite_area)
     kk_decel = 0.5 * RHO_AIR * vehicle.drag_cd * decel_area / mass_kg
     effective_weight_cruise_n = max(weight_n - lift_fn(v_cruise), 0.0)
     thrust_horizontal_decel_n = math.sqrt(max(thrust_n * thrust_n - effective_weight_cruise_n * effective_weight_cruise_n, 0.0))

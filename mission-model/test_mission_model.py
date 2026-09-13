@@ -418,6 +418,46 @@ def test_run_auto_series_stacks_a_lower_voltage_battery_to_reach_the_motor():
         assert stacked.cells_s == 24
 
 
+def test_parasite_drag_area_zero_for_wingless():
+    assert mm.parasite_drag_area_m2(mm.MULTIROTOR) == 0.0  # wing_area_m2=0 zeroes it regardless of parasite_cd0
+
+
+def test_parasite_drag_area_matches_formula_for_winged():
+    winged = dataclasses.replace(mm.MULTIROTOR, wing_area_m2=2.0, wing_cl=0.6, drag_cd=0.4, parasite_cd0=0.05)
+    assert math.isclose(mm.parasite_drag_area_m2(winged), 0.05 * 2.0 / 0.4, rel_tol=1e-12)
+
+
+def test_effective_area_at_adds_parasite_area():
+    lift_fn = lambda _v: 0.0
+    base = mm._effective_area_at(thrust_n=100.0, weight_n=50.0, base_area_m2=0.2, lift_fn=lift_fn, v=5.0)
+    with_parasite = mm._effective_area_at(thrust_n=100.0, weight_n=50.0, base_area_m2=0.2, lift_fn=lift_fn, v=5.0,
+                                           parasite_area_m2=0.3)
+    assert math.isclose(with_parasite, base + 0.3, rel_tol=1e-12)
+
+
+def test_parasite_drag_lowers_equilibrium_velocity_for_a_winged_vehicle():
+    """Regression for the validation spike's finding: a winged vehicle's
+    equilibrium cruise speed came out at 150-200 m/s (10x too fast for any
+    real aircraft this size) because the only drag area modeled was the
+    prop/frame frontal area -- the wing's own parasite drag wasn't in the
+    equation at all. Adding it (parasite_cd0 > 0) must pull the equilibrium
+    speed down, not leave it unchanged."""
+    cfg = make_cfg(thrust_at_100=3000.0, current_at_100=25.0)
+    thrust_n = mm.rotor_set_thrust_n(mm.MULTIROTOR, cfg, 100.0)
+    base_area = mm.frontal_area_m2(mm.MULTIROTOR, cfg)
+    winged_no_parasite = dataclasses.replace(mm.MULTIROTOR, wing_area_m2=2.0, wing_cl=0.6, parasite_cd0=0.0)
+    winged_with_parasite = dataclasses.replace(mm.MULTIROTOR, wing_area_m2=2.0, wing_cl=0.6, parasite_cd0=0.045)
+    weight_n = 100.0  # well under this cfg's ~177 N max thrust so both cases can actually reach equilibrium
+    lift_fn_a = lambda v: mm.wing_lift_n(winged_no_parasite, v)
+    lift_fn_b = lambda v: mm.wing_lift_n(winged_with_parasite, v)
+    v_eq_no_parasite = mm._equilibrium_velocity(thrust_n, weight_n, base_area, winged_no_parasite.drag_cd, lift_fn_a)
+    v_eq_with_parasite = mm._equilibrium_velocity(
+        thrust_n, weight_n, base_area, winged_with_parasite.drag_cd, lift_fn_b,
+        parasite_area_m2=mm.parasite_drag_area_m2(winged_with_parasite),
+    )
+    assert v_eq_with_parasite < v_eq_no_parasite, (v_eq_with_parasite, v_eq_no_parasite)
+
+
 def test_equilibrium_velocity_is_where_drag_balances_horizontal_thrust():
     """The cruise speed is no longer prescribed -- it's the root of
     thrust_horizontal(v) = drag(v). Check both the wingless closed-form case
