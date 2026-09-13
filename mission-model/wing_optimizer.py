@@ -152,6 +152,104 @@ def solidworks_naca4_equations(naca_code: str, chord_value: float, units: str = 
     return result
 
 
+def parse_selig_dat(text: str) -> list[tuple[float, float]]:
+    """Parse a Selig-format UIUC airfoil .dat file's content: a title line,
+    then whitespace-separated chord-fraction "x y" pairs (upper surface
+    trailing edge to leading edge, then lower surface leading edge to
+    trailing edge, in the usual UIUC convention -- this just reads points in
+    file order, it doesn't resort or validate topology). Real digitized
+    coordinates are used exactly as given, not run through NACA's closed/
+    open-TE coefficient logic -- that's specific to the analytic 4-digit
+    family and has no meaning for arbitrary scanned/digitized geometry.
+    """
+    points = []
+    for line in text.splitlines()[1:]:  # first line is the airfoil name/title
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            points.append((float(parts[0]), float(parts[1])))
+        except ValueError:
+            continue
+    if len(points) < 3:
+        raise ValueError(
+            f"expected a Selig-format airfoil .dat (title line + coordinate pairs), got {len(points)} usable point(s)"
+        )
+    return points
+
+
+def place_station_points(coords_frac: list[tuple[float, float]], chord_value: float, units: str = "mm",
+                          twist_deg: float = 0.0, twist_pivot_frac: float = 0.25,
+                          sweep_offset_mm: float = 0.0) -> list[tuple[float, float, float]]:
+    """Scale unit-chord (x, y) airfoil coordinates to chord_value (in
+    `units`, converted to mm to match solidworks_naca4_equations()'s
+    convention), apply twist about twist_pivot_frac * chord (the same
+    rotate_about_pivot() transform that function uses for NACA), then add
+    sweep_offset_mm to x. Returns (x, y, 0.0) triples ready for a SolidWorks
+    "Curve Through XYZ Points" (.sldcrv) import -- Z=0 matches the NACA
+    export's convention of putting all spanwise offset on the station's own
+    sketch plane, not in a Z coordinate.
+    """
+    chord_mm = chord_value * UNIT_TO_MM[units]
+    pivot_x = twist_pivot_frac * chord_mm
+    out = []
+    for xf, yf in coords_frac:
+        x, y = xf * chord_mm, yf * chord_mm
+        if twist_deg != 0.0:
+            x, y = rotate_about_pivot(x, y, pivot_x, twist_deg)
+        out.append((x + sweep_offset_mm, y, 0.0))
+    return out
+
+
+def write_sldcrv(points: list[tuple[float, float, float]], path: str) -> None:
+    """Write a SolidWorks "Curve Through XYZ Points" file: one point per
+    line, tab-separated X/Y/Z, in the same units the points were already
+    scaled to (mm, matching this script's other SolidWorks output)."""
+    with open(path, "w") as f:
+        for x, y, z in points:
+            f.write(f"{x:.6f}\t{y:.6f}\t{z:.6f}\n")
+
+
+def wing_stations(result: dict, planform: str, elliptical_stations: int, twist_deg: float, sweep_deg: float,
+                   tapered: bool, swept_or_twisted: bool) -> list[dict]:
+    """The root/tip/N-station planform layout shared by both the NACA
+    equation export and the airfoil-.dat point-cloud export: each entry is
+    {label, chord_m, twist_deg, sweep_offset_mm}. A rectangular (untapered/
+    unswept/untwisted linear) wing needs one station; a linear taper needs
+    Root+Tip; an elliptical planform needs elliptical_stations of them
+    (twist/sweep interpolated linearly by span fraction, 0 at the root) --
+    see optimize_wing()'s planform handling for why an ellipse has no single
+    taper_ratio to key off of instead.
+    """
+    half_span_mm = result["span_m"] / 2 * 1000
+    if planform == "elliptical":
+        n = max(elliptical_stations, 2)
+        stations = []
+        for i in range(n):
+            y_frac = i / (n - 1)
+            if i == n - 1:
+                # A literal y_frac=1 station has zero chord -- nudge in from
+                # the true tip so every station still has a real profile (a
+                # practical build blends to a small square-cut tip here
+                # rather than the mathematical point, same as real
+                # elliptical wings do).
+                y_frac = 1.0 - 1e-3
+            stations.append({
+                "label": f"S{i}",
+                "chord_m": elliptical_chord_m(y_frac, result["root_chord_m"]),
+                "twist_deg": twist_deg * y_frac,
+                "sweep_offset_mm": y_frac * half_span_mm * math.tan(math.radians(sweep_deg)),
+            })
+        return stations
+    if not tapered and not swept_or_twisted:
+        return [{"label": "Root", "chord_m": result["chord_m"], "twist_deg": 0.0, "sweep_offset_mm": 0.0}]
+    sweep_offset_mm = half_span_mm * math.tan(math.radians(sweep_deg))
+    return [
+        {"label": "Root", "chord_m": result["root_chord_m"], "twist_deg": 0.0, "sweep_offset_mm": 0.0},
+        {"label": "Tip", "chord_m": result["tip_chord_m"], "twist_deg": twist_deg, "sweep_offset_mm": sweep_offset_mm},
+    ]
+
+
 def rotate_about_pivot(x: float, y: float, pivot_x: float, twist_deg: float) -> tuple[float, float]:
     """Rotate (x, y) by twist_deg (degrees, +LE up) about (pivot_x, 0) --
     the real-units twist transform solidworks_naca4_equations() emits as SW
@@ -274,7 +372,19 @@ def main() -> None:
     parser.add_argument("--out", default=None, help="optional path to a vehicle_configs-style JSON file to append the result to")
     parser.add_argument("--naca", default=None,
                          help="4-digit NACA code (e.g. 2412) -- if given, also emits SolidWorks "
-                              "Equation Driven Curve equations for the airfoil at the optimized chord")
+                              "Equation Driven Curve equations for the airfoil at the optimized chord. "
+                              "Not accepted together with --airfoil-dat")
+    parser.add_argument("--airfoil-dat", default=None,
+                         help="path to a Selig-format (UIUC airfoil database) .dat coordinate file -- "
+                              "an alternative to --naca for any real airfoil outside the analytic NACA "
+                              "4-digit family (Clark-Y, Eppler, Selig/SD, etc.). Since digitized "
+                              "coordinates have no closed-form equation, this emits SolidWorks "
+                              "\"Curve Through XYZ Points\" (.sldcrv) files instead of Equation Driven "
+                              "Curve equations -- one per station, written to --curve-points-out-dir. "
+                              "Not accepted together with --naca")
+    parser.add_argument("--curve-points-out-dir", default=None,
+                         help="directory to write one .sldcrv point file per station into, for "
+                              "--airfoil-dat (ignored otherwise); required if --airfoil-dat is given")
     parser.add_argument("--open-te", action="store_true",
                          help="use the standard open-trailing-edge NACA coefficient instead of the closed-TE one "
                               "(default closed, since an open TE leaves a ~0.002-chord gap a real part can't have)")
@@ -307,6 +417,10 @@ def main() -> None:
                               "Mission_Model.py's load_vehicle_types() globs every *.json there and expects each "
                               "entry to be a full VehicleType. Pass an empty string to skip writing it")
     args = parser.parse_args()
+    if args.naca and args.airfoil_dat:
+        parser.error("--naca and --airfoil-dat are alternatives -- pass one, not both")
+    if args.airfoil_dat and not args.curve_points_out_dir:
+        parser.error("--airfoil-dat needs --curve-points-out-dir to write its station point files to")
 
     result = optimize_wing(
         args.lift_mass_kg, args.cruise_mps, args.cl, args.min_ar, args.max_ar,
@@ -356,7 +470,7 @@ def main() -> None:
                 "areal_density_g_m2": args.areal_density_g_m2, "ar_mass_exponent": args.ar_mass_exponent,
                 "taper_ratio": args.taper_ratio, "planform": args.planform,
                 "sweep_deg": args.sweep_deg, "twist_deg": args.twist_deg,
-                "naca": args.naca, "closed_te": not args.open_te,
+                "naca": args.naca, "closed_te": not args.open_te, "airfoil_dat": args.airfoil_dat,
             },
             "wing_area_m2": round(result["wing_area_m2"], 4),
             "aspect_ratio": round(result["aspect_ratio"], 4),
@@ -379,24 +493,54 @@ def main() -> None:
             f.write("\n")
         print(f"recorded full wing geometry for {args.name!r} to {args.geometry_out}")
 
+    stations = wing_stations(result, args.planform, args.elliptical_stations, args.twist_deg, args.sweep_deg,
+                              tapered, swept_or_twisted) if (args.naca or args.airfoil_dat) else []
+
+    def loft_note(n: int) -> str:
+        half_span_mm = result["span_m"] / 2 * 1000
+        if n == 1:
+            return "# Rectangular planform, same profile at root and tip -- one station needed."
+        if elliptical:
+            return (
+                f"# Elliptical planform: {n} stations, lofted through all of them in order (a 2-station\n"
+                f"# loft can't approximate a continuously-curving edge). Place station i's sketch on a\n"
+                f"# plane offset i/{n - 1} * {half_span_mm:.2f} mm from the root plane along the span axis\n"
+                f"# only -- sweep is baked into each station's own placement below instead."
+            )
+        return (
+            f"# Tapered/swept/twisted wing: two stations, lofted between them. Place the tip\n"
+            f"# sketch on a plane offset {half_span_mm:.2f} mm from the root plane along the span\n"
+            f"# axis only (no X shift on the plane itself -- sweep is baked into the tip's\n"
+            f"# placement below instead)."
+        )
+
+    def loft_close_note(n: int) -> str:
+        target = "the elliptical panel" if elliptical else "the tapered/swept/twisted panel"
+        return (
+            f"# Loft (Insert > Boss/Base > Loft) through all {n} station profiles in span order\n"
+            f"# (upper+lower curves knitted into one contour each) to get {target};\n"
+            "# mirror it about the root plane for the other half-span."
+        )
+
     if args.naca:
         closed_te = not args.open_te
         m, p, t = naca4_params(args.naca)
-        lines = []
+        lines = [loft_note(len(stations)), ""]
 
-        def station_block(label: str, chord_m: float, twist_deg: float, sweep_offset_mm: float) -> list[str]:
-            eqs = solidworks_naca4_equations(args.naca, chord_m, units="m", closed_te=closed_te,
-                                              twist_deg=twist_deg, sweep_offset_mm=sweep_offset_mm,
-                                              var_prefix=f"{label.lower()}_")
-            out = [
-                f"## {label}: NACA {args.naca} at chord = {chord_m:.4f} m ({chord_m * 1000:.2f} mm)"
-                + (f", twist {twist_deg:+.2f} deg about quarter-chord" if twist_deg else "")
-                + (f", sweep offset {sweep_offset_mm:+.2f} mm" if sweep_offset_mm else ""),
-                "# SolidWorks Tools > Equations (global variables):",
-            ]
+        for station in stations:
+            eqs = solidworks_naca4_equations(args.naca, station["chord_m"], units="m", closed_te=closed_te,
+                                              twist_deg=station["twist_deg"], sweep_offset_mm=station["sweep_offset_mm"],
+                                              var_prefix=f"{station['label'].lower()}_")
+            lines.append(
+                f"## {station['label']}: NACA {args.naca} at chord = {station['chord_m']:.4f} m "
+                f"({station['chord_m'] * 1000:.2f} mm)"
+                + (f", twist {station['twist_deg']:+.2f} deg about quarter-chord" if station["twist_deg"] else "")
+                + (f", sweep offset {station['sweep_offset_mm']:+.2f} mm" if station["sweep_offset_mm"] else "")
+            )
+            lines.append("# SolidWorks Tools > Equations (global variables):")
             for name, expr in eqs["global_variables"].items():
-                out.append(f'"{name}" = {expr}')
-            out += [
+                lines.append(f'"{name}" = {expr}')
+            lines += [
                 "# Sketch > Spline > Equation Driven Curve, parametric, t from 0 to 1:",
                 "# Upper surface:",
                 f"x(t) = {eqs['upper_x_of_t']}",
@@ -406,56 +550,8 @@ def main() -> None:
                 f"y(t) = {eqs['lower_y_of_t']}",
                 "",
             ]
-            return out
-
-        if elliptical:
-            n = max(args.elliptical_stations, 2)
-            half_span_mm = result["span_m"] / 2 * 1000
-            lines.append(
-                f"# Elliptical planform: {n} stations, lofted through all of them in order (a 2-station\n"
-                f"# loft can't approximate a continuously-curving edge). Place station i's sketch on a\n"
-                f"# plane offset i/{n - 1} * {half_span_mm:.2f} mm from the root plane along the span axis\n"
-                f"# only -- sweep is baked into each station's x(t) below instead."
-            )
-            lines.append("")
-            for i in range(n):
-                y_frac = i / (n - 1)
-                chord_m = elliptical_chord_m(y_frac, result["root_chord_m"])
-                if i == n - 1:
-                    # A literal y_frac=1 station has zero chord -- no airfoil curve exists there.
-                    # Nudge the last station in from the true tip so it still lofts to a real
-                    # (very small) profile; a practical build blends to a small square-cut tip
-                    # here rather than the mathematical point, same as real elliptical wings do.
-                    y_frac = 1.0 - 1e-3
-                    chord_m = elliptical_chord_m(y_frac, result["root_chord_m"])
-                twist_deg = args.twist_deg * y_frac
-                sweep_offset_mm = y_frac * half_span_mm * math.tan(math.radians(args.sweep_deg))
-                lines += station_block(f"S{i}", chord_m, twist_deg, sweep_offset_mm)
-            lines.append(
-                f"# Loft (Insert > Boss/Base > Loft) through all {n} station profiles in span order\n"
-                "# (upper+lower curves knitted into one contour each) to get the elliptical panel;\n"
-                "# mirror it about the root plane for the other half-span."
-            )
-        elif not tapered and not swept_or_twisted:
-            lines.append(f"# Rectangular planform, same profile at root and tip -- one station needed.")
-            lines += station_block("Root", result["chord_m"], 0.0, 0.0)
-        else:
-            half_span_mm = result["span_m"] / 2 * 1000
-            sweep_offset_mm = half_span_mm * math.tan(math.radians(args.sweep_deg))
-            lines.append(
-                f"# Tapered/swept/twisted wing: two stations, lofted between them. Place the tip\n"
-                f"# sketch on a plane offset {half_span_mm:.2f} mm from the root plane along the span\n"
-                f"# axis only (no X shift on the plane itself -- sweep is baked into the tip's x(t)\n"
-                f"# below instead)."
-            )
-            lines.append("")
-            lines += station_block("Root", result["root_chord_m"], 0.0, 0.0)
-            lines += station_block("Tip", result["tip_chord_m"], args.twist_deg, sweep_offset_mm)
-            lines.append(
-                "# Loft (Insert > Boss/Base > Loft) between the Root and Tip closed profiles\n"
-                "# (upper+lower curves knitted into one contour each) to get the tapered/swept/\n"
-                "# twisted panel; mirror it about the root plane for the other half-span."
-            )
+        if len(stations) > 1:
+            lines.append(loft_close_note(len(stations)))
 
         print()
         print("\n".join(lines))
@@ -471,6 +567,34 @@ def main() -> None:
             with open(args.sw_eq_out, "w") as f:
                 f.write("\n".join(lines) + "\n")
             print(f"\nwrote SolidWorks equations to {args.sw_eq_out}")
+
+    elif args.airfoil_dat:
+        with open(args.airfoil_dat) as f:
+            coords_frac = parse_selig_dat(f.read())
+        airfoil_name = os.path.splitext(os.path.basename(args.airfoil_dat))[0]
+
+        print()
+        print(loft_note(len(stations)))
+        print(f"# Airfoil: {airfoil_name!r} ({len(coords_frac)} digitized points from {args.airfoil_dat}) --")
+        print("# not a NACA analytic family, so each station below is a point cloud for SolidWorks'")
+        print("# \"Curve Through XYZ Points\" import (Insert > Curve > Curve Through XYZ Points),")
+        print("# not an Equation Driven Curve.")
+        print()
+        os.makedirs(args.curve_points_out_dir, exist_ok=True)
+        for station in stations:
+            points = place_station_points(coords_frac, station["chord_m"], units="m",
+                                           twist_deg=station["twist_deg"], sweep_offset_mm=station["sweep_offset_mm"])
+            out_path = os.path.join(args.curve_points_out_dir, f"{args.name}_{station['label']}.sldcrv")
+            write_sldcrv(points, out_path)
+            print(
+                f"## {station['label']}: chord = {station['chord_m']:.4f} m ({station['chord_m'] * 1000:.2f} mm)"
+                + (f", twist {station['twist_deg']:+.2f} deg" if station["twist_deg"] else "")
+                + (f", sweep offset {station['sweep_offset_mm']:+.2f} mm" if station["sweep_offset_mm"] else "")
+                + f" -> {out_path} ({len(points)} points)"
+            )
+        if len(stations) > 1:
+            print()
+            print(loft_close_note(len(stations)))
 
 
 if __name__ == "__main__":

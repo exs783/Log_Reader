@@ -6,6 +6,7 @@ from wing_optimizer import (
     required_wing_area_m2, wing_mass_g, optimize_wing, AR_REF,
     naca4_params, naca4_airfoil_point, solidworks_naca4_equations, rotate_about_pivot,
     bending_relief_factor, elliptical_chord_m,
+    parse_selig_dat, place_station_points, wing_stations,
 )
 from Mission_Model import G, RHO_AIR
 
@@ -222,5 +223,82 @@ try:
     raise AssertionError("elliptical planform with a non-default taper_ratio should be rejected")
 except ValueError:
     pass
+
+# parse_selig_dat: a minimal Selig-format (UIUC) airfoil .dat -- title line,
+# then whitespace-separated chord-fraction "x y" pairs, real digitized
+# geometry rather than an analytic NACA family. Uses a synthetic symmetric
+# diamond shape (not a real airfoil) since only the parsing is under test.
+sample_dat = """Test Diamond Airfoil
+1.0 0.0
+0.5 0.05
+0.0 0.0
+0.5 -0.05
+1.0 0.0
+"""
+pts = parse_selig_dat(sample_dat)
+assert pts == [(1.0, 0.0), (0.5, 0.05), (0.0, 0.0), (0.5, -0.05), (1.0, 0.0)]
+assert len(pts) == 5, "title line must not be parsed as a coordinate"
+
+try:
+    parse_selig_dat("Just A Title\n1.0 0.0\n")
+    raise AssertionError("a file with only one usable point should be rejected")
+except ValueError:
+    pass
+
+# place_station_points: no twist/sweep should just scale by chord (m -> mm).
+plain = place_station_points([(1.0, 0.0), (0.0, 0.0)], chord_value=0.5, units="m")
+assert plain == [(500.0, 0.0, 0.0), (0.0, 0.0, 0.0)]
+
+# Twist must match rotate_about_pivot() exactly -- same transform NACA's
+# SolidWorks export already uses, just applied to raw coordinates instead of
+# an equation string.
+twisted = place_station_points([(1.0, 0.0)], chord_value=1.0, units="m", twist_deg=30.0)
+expected_x, expected_y = rotate_about_pivot(1000.0, 0.0, pivot_x=250.0, twist_deg=30.0)
+assert math.isclose(twisted[0][0], expected_x, rel_tol=1e-9)
+assert math.isclose(twisted[0][1], expected_y, rel_tol=1e-9)
+assert twisted[0][2] == 0.0
+
+# Sweep offset must land purely in x, after any twist.
+swept = place_station_points([(0.0, 0.0)], chord_value=1.0, units="m", sweep_offset_mm=42.0)
+assert swept == [(42.0, 0.0, 0.0)]
+
+# wing_stations: rectangular (untapered/unswept/untwisted linear planform)
+# collapses to a single Root station at the mean chord.
+rect_result = optimize_wing(lift_mass_kg=12.0, cruise_mps=25.0, cl=0.6, min_ar=4.0, max_ar=10.0,
+                             max_span_m=None, areal_density_g_m2=1500.0, ar_mass_exponent=0.5)
+rect_stations = wing_stations(rect_result, planform="linear", elliptical_stations=6,
+                               twist_deg=0.0, sweep_deg=0.0, tapered=False, swept_or_twisted=False)
+assert len(rect_stations) == 1
+assert rect_stations[0]["label"] == "Root"
+assert math.isclose(rect_stations[0]["chord_m"], rect_result["chord_m"], rel_tol=1e-9)
+
+# wing_stations: a linear taper gets exactly Root+Tip, at the root/tip chords
+# optimize_wing() itself computed.
+tap_result = optimize_wing(lift_mass_kg=12.0, cruise_mps=25.0, cl=0.6, min_ar=4.0, max_ar=10.0,
+                            max_span_m=None, areal_density_g_m2=1500.0, ar_mass_exponent=0.5, taper_ratio=0.5)
+tap_stations = wing_stations(tap_result, planform="linear", elliptical_stations=6,
+                              twist_deg=-4.0, sweep_deg=10.0, tapered=True, swept_or_twisted=True)
+assert [s["label"] for s in tap_stations] == ["Root", "Tip"]
+assert math.isclose(tap_stations[0]["chord_m"], tap_result["root_chord_m"], rel_tol=1e-9)
+assert math.isclose(tap_stations[1]["chord_m"], tap_result["tip_chord_m"], rel_tol=1e-9)
+assert tap_stations[0]["twist_deg"] == 0.0
+assert tap_stations[1]["twist_deg"] == -4.0
+assert tap_stations[0]["sweep_offset_mm"] == 0.0
+assert tap_stations[1]["sweep_offset_mm"] > 0.0
+
+# wing_stations: elliptical gets N stations, decreasing chord root->tip, with
+# twist/sweep interpolated linearly by span fraction (0 at the root).
+ell_result = optimize_wing(lift_mass_kg=12.0, cruise_mps=25.0, cl=0.6, min_ar=4.0, max_ar=10.0,
+                            max_span_m=None, areal_density_g_m2=1500.0, ar_mass_exponent=0.5,
+                            planform="elliptical")
+ell_stations = wing_stations(ell_result, planform="elliptical", elliptical_stations=5,
+                              twist_deg=-6.0, sweep_deg=15.0, tapered=False, swept_or_twisted=False)
+assert len(ell_stations) == 5
+assert math.isclose(ell_stations[0]["chord_m"], ell_result["root_chord_m"], rel_tol=1e-9)
+assert ell_stations[0]["twist_deg"] == 0.0 and ell_stations[0]["sweep_offset_mm"] == 0.0
+for a, b in zip(ell_stations, ell_stations[1:]):
+    assert b["chord_m"] < a["chord_m"], "chord must strictly decrease root to tip on an ellipse"
+    assert b["twist_deg"] < a["twist_deg"], "twist should ramp toward the (negative) tip value"
+    assert b["sweep_offset_mm"] > a["sweep_offset_mm"]
 
 print("wing_optimizer self-check: all assertions passed")
