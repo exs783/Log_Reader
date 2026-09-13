@@ -170,9 +170,27 @@ class Battery:
     cost_usd: float
     cells_s: int  # cell count (6S/12S/24S/...) -- a motor's thrust/current curve is only
     # valid at the voltage it was measured on, so a motor is only paired with a battery
-    # of the *same* cells_s (see run()); this model doesn't extrapolate performance
-    # across voltages, since doing that accurately needs a validated KV/voltage scaling
-    # law this project doesn't have data to back.
+    # of that same cells_s, or with several of a *lower* cells_s wired in series to reach
+    # it (see series_stack_battery() and run()); this model doesn't extrapolate curve
+    # performance across voltages, since doing that accurately needs a validated KV/
+    # voltage scaling law this project doesn't have data to back -- stacking packs changes
+    # the electrical supply, not the motor's own measured curve, so it stays valid.
+
+
+def series_stack_battery(battery: Battery, k: int) -> Battery:
+    """k copies of `battery` wired in series: voltage (cells_s) multiplies by k,
+    capacity stays the same (series adds volts, not amp-hours), mass/cost scale
+    linearly with the extra packs. This is the manual "12Sx2 -> 24S" pattern
+    battery lineups have used by hand -- generalized so run() can synthesize it
+    for any battery/motor voltage gap that's an integer multiple, instead of
+    requiring a hand-authored pack for every voltage a motor happens to need."""
+    return dataclasses.replace(
+        battery,
+        name=f"{battery.name}_x{k}S",
+        mass_g=battery.mass_g * k,
+        cost_usd=battery.cost_usd * k,
+        cells_s=battery.cells_s * k,
+    )
 
 
 # Reproduces the original MATLAB model's battery lineup. cells_s wasn't part
@@ -897,9 +915,17 @@ def run(data_dir: str, payload_lb: float = DEFAULT_PAYLOAD_LB, grid_step: float 
     for vehicle in vehicle_types:
         for cfg in configs:
             # A motor's thrust/current curve was measured at one specific
-            # voltage; pair it only with a battery of that same cell count
-            # rather than extrapolating performance across voltages.
-            compatible_batteries = [b for b in batteries if b.cells_s == cfg.cells_s]
+            # voltage; pair it with a battery of that same cell count, or
+            # auto series-stack several of a lower-cells_s battery to reach
+            # it (see series_stack_battery()) -- stacking only goes up, since
+            # splitting a pack down to a lower voltage needs a regulator this
+            # model doesn't have.
+            compatible_batteries = []
+            for b in batteries:
+                if b.cells_s == cfg.cells_s:
+                    compatible_batteries.append(b)
+                elif cfg.cells_s > b.cells_s and cfg.cells_s % b.cells_s == 0:
+                    compatible_batteries.append(series_stack_battery(b, cfg.cells_s // b.cells_s))
             skipped_voltage_mismatch += len(batteries) - len(compatible_batteries)
             for battery in compatible_batteries:
                 airframe_g = airframe_mass_g(vehicle, cfg)

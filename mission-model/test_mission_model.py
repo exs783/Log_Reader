@@ -384,6 +384,40 @@ def test_run_skips_voltage_mismatched_battery_pairs():
         assert df2.iloc[0]["battery"] == "6S-pack"
 
 
+def test_run_auto_series_stacks_a_lower_voltage_battery_to_reach_the_motor():
+    import json
+    import tempfile
+
+    motor_data = [{
+        "motor_model": "TestMotor24S",
+        "prop_diameter_in": 16, "motor_mass_g": 100, "prop_mass_g": 20,
+        "motor_cost": 50, "prop_cost": 10, "cells_s": 24,
+        "throttle_pct": [40, 60, 80, 100], "thrust_g": [1000, 1500, 2100, 2800],
+        "current_a": [8, 12, 18, 25],
+    }]
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        with open(os.path.join(tmp_dir, "motor.json"), "w") as f:
+            json.dump(motor_data, f)
+
+        # 24 is a multiple of 12 (x2) but not of 8 (24/8 = 3 -- that one
+        # *is* an integer multiple too, so both should synthesize a stack).
+        base_12s = mm.Battery(name="12S-pack", mass_g=2000.0, capacity_mah=16000.0, cost_usd=300.0, cells_s=12)
+        odd_9s = mm.Battery(name="9S-pack", mass_g=500.0, capacity_mah=5000.0, cost_usd=80.0, cells_s=9)
+        df = mm.run(tmp_dir, grid_step=5.0, batteries=[base_12s, odd_9s])
+
+        assert len(df) == 1  # 9S has no integer stack to 24S -- still skipped
+        row = df.iloc[0]
+        assert row["battery"] == "12S-pack_x2S"
+        assert row["cells_s"] == 24
+        assert row["battery_capacity_mah"] == 16000.0  # series stacking doesn't add capacity
+
+        stacked = mm.series_stack_battery(base_12s, 2)
+        assert stacked.mass_g == 4000.0  # mass doubles with 2 packs in series
+        assert stacked.cost_usd == 600.0
+        assert stacked.capacity_mah == 16000.0
+        assert stacked.cells_s == 24
+
+
 def test_equilibrium_velocity_is_where_drag_balances_horizontal_thrust():
     """The cruise speed is no longer prescribed -- it's the root of
     thrust_horizontal(v) = drag(v). Check both the wingless closed-form case
