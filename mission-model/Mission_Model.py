@@ -1050,7 +1050,12 @@ def plot_results(df: pd.DataFrame, out_prefix: str | None):
     if out_prefix:
         fig1.savefig(f"{out_prefix}_best_hover_by_vehicle.png", bbox_inches="tight", dpi=150)
         fig2.savefig(f"{out_prefix}_best_energy_margin_by_vehicle.png", bbox_inches="tight", dpi=150)
-        fig3.write_html(f"{out_prefix}_hover_vs_mass_tradespace.html")
+        # include_plotlyjs="cdn" instead of the default True: the default inlines
+        # the whole ~4.5MB plotly.js bundle into the file, dwarfing the actual
+        # data (a few hundred KB for thousands of rows). Loading it from a CDN
+        # instead needs network access to view the file, but drops it to a
+        # fraction of the size.
+        fig3.write_html(f"{out_prefix}_hover_vs_mass_tradespace.html", include_plotlyjs="cdn")
     else:
         plt.show()
         fig3.show()

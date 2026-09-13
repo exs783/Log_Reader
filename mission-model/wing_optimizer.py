@@ -170,15 +170,50 @@ def required_wing_area_m2(lift_mass_kg: float, cruise_mps: float, cl: float) -> 
     return lift_n / (0.5 * RHO_AIR * cl * cruise_mps * cruise_mps)
 
 
-def wing_mass_g(area_m2: float, aspect_ratio: float, areal_density_g_m2: float, ar_mass_exponent: float) -> float:
-    return areal_density_g_m2 * area_m2 * (aspect_ratio / AR_REF) ** ar_mass_exponent
+def wing_mass_g(area_m2: float, aspect_ratio: float, areal_density_g_m2: float, ar_mass_exponent: float,
+                 bending_relief_factor: float = 1.0) -> float:
+    return areal_density_g_m2 * area_m2 * (aspect_ratio / AR_REF) ** ar_mass_exponent * bending_relief_factor
+
+
+def bending_relief_factor(planform: str, taper_ratio: float) -> float:
+    """How much lighter a tapered/elliptical wing's structure can be than a
+    rectangular one of the same area/AR, from the root bending moment a
+    chord-proportional spanwise load produces (load ~ chord is the standard
+    first-order assumption at a fixed cl). Integrating y*load(y) over the
+    semi-span and normalizing to the rectangular case (taper_ratio=1) gives
+    (1 + 2*taper_ratio) / 3 for a linear taper -- 1.0 at taper_ratio=1 (no
+    change from today's model), down to 1/3 at taper_ratio=0 (a triangular
+    planform). An elliptical load distribution's own integral comes out to
+    2/3 exactly, independent of any taper_ratio -- which lands near the
+    linear formula's taper_ratio~0.5 value, the well-known rule of thumb for
+    approximating elliptical loading with a linear taper.
+    """
+    if planform == "linear":
+        return (1.0 + 2.0 * taper_ratio) / 3.0
+    if planform == "elliptical":
+        return 2.0 / 3.0
+    raise ValueError(f"planform must be 'linear' or 'elliptical', got {planform!r}")
+
+
+def elliptical_chord_m(y_frac: float, root_chord_m: float) -> float:
+    """Local chord at a fractional semi-span position (0=root, 1=tip) of a
+    true elliptical planform: chord(y) = root_chord * sqrt(1 - y_frac^2).
+    Integrating this over the semi-span and doubling gives the classic
+    area = (pi/4) * root_chord * span identity optimize_wing() relies on."""
+    return root_chord_m * math.sqrt(max(1.0 - y_frac * y_frac, 0.0))
 
 
 def optimize_wing(lift_mass_kg: float, cruise_mps: float, cl: float, min_ar: float, max_ar: float,
                    max_span_m: float | None, areal_density_g_m2: float, ar_mass_exponent: float,
-                   steps: int = 200, taper_ratio: float = 1.0) -> dict:
+                   steps: int = 200, taper_ratio: float = 1.0, planform: str = "linear") -> dict:
     if taper_ratio <= 0.0:
         raise ValueError(f"taper_ratio must be > 0 (tip_chord/root_chord), got {taper_ratio}")
+    if planform == "elliptical" and taper_ratio != 1.0:
+        raise ValueError(
+            "taper_ratio doesn't apply to an elliptical planform (its tip/root ratio is fixed at 0 "
+            "by the ellipse itself, not user-chosen) -- leave taper_ratio at its default of 1.0"
+        )
+    relief = bending_relief_factor(planform, taper_ratio)
     area_m2 = required_wing_area_m2(lift_mass_kg, cruise_mps, cl)
 
     best = None
@@ -187,7 +222,7 @@ def optimize_wing(lift_mass_kg: float, cruise_mps: float, cl: float, min_ar: flo
         span_m = math.sqrt(ar * area_m2)
         if max_span_m is not None and span_m > max_span_m:
             continue
-        mass_g = wing_mass_g(area_m2, ar, areal_density_g_m2, ar_mass_exponent)
+        mass_g = wing_mass_g(area_m2, ar, areal_density_g_m2, ar_mass_exponent, bending_relief_factor=relief)
         if best is None or mass_g < best["wing_mass_g"]:
             best = {"aspect_ratio": ar, "span_m": span_m, "wing_mass_g": mass_g}
 
@@ -199,17 +234,25 @@ def optimize_wing(lift_mass_kg: float, cruise_mps: float, cl: float, min_ar: flo
         )
 
     best["wing_area_m2"] = area_m2
+    best["planform"] = planform
+    best["bending_relief_factor"] = relief
     # Mean chord from area/span holds regardless of taper (area = span *
     # mean_chord always); taper only changes how that mean splits between
-    # root and tip (area = span * (root+tip)/2 for a linear taper). Neither
-    # wing_mass_g's estimate nor the AR search above depends on the split --
-    # taper's real aerodynamic/structural benefits (e.g. reduced induced
-    # drag near taper_ratio~0.4, a lighter root-to-tip load distribution)
-    # aren't modeled here, only the resulting geometry is.
+    # root and tip (area = span * (root+tip)/2 for a linear taper; area =
+    # span * (pi/4) * root_chord for a true ellipse, root_chord = 4*area/
+    # (pi*span) -- see elliptical_chord_m()). bending_relief_factor above is
+    # this model's only feedback from planform into the mass estimate; the
+    # rest (e.g. induced-drag differences between planforms) still isn't
+    # modeled here, only the resulting geometry is.
     best["chord_m"] = area_m2 / best["span_m"]
-    best["taper_ratio"] = taper_ratio
-    best["root_chord_m"] = 2 * best["chord_m"] / (1 + taper_ratio)
-    best["tip_chord_m"] = taper_ratio * best["root_chord_m"]
+    if planform == "elliptical":
+        best["taper_ratio"] = 0.0
+        best["root_chord_m"] = 4.0 * area_m2 / (math.pi * best["span_m"])
+        best["tip_chord_m"] = 0.0
+    else:
+        best["taper_ratio"] = taper_ratio
+        best["root_chord_m"] = 2 * best["chord_m"] / (1 + taper_ratio)
+        best["tip_chord_m"] = taper_ratio * best["root_chord_m"]
     best["wing_loading_kg_m2"] = lift_mass_kg / area_m2
     best["span_capped"] = max_span_m is not None and best["aspect_ratio"] < max_ar - 1e-9
     return best
@@ -239,7 +282,15 @@ def main() -> None:
                          help="optional path to write the SolidWorks equations to as plain text, ready to paste")
     parser.add_argument("--taper-ratio", type=float, default=1.0,
                          help="tip_chord/root_chord (default 1.0 = untapered/rectangular); "
-                              "geometry-only, not fed back into the mass estimate")
+                              "reduces the estimated wing mass via bending_relief_factor(), "
+                              "not accepted together with --planform elliptical")
+    parser.add_argument("--planform", choices=["linear", "elliptical"], default="linear",
+                         help="wing planform shape (default linear = today's rectangular/tapered "
+                              "geometry via --taper-ratio); elliptical fixes tip_chord_m to 0 and "
+                              "gets its own bending_relief_factor, independent of --taper-ratio")
+    parser.add_argument("--elliptical-stations", type=int, default=6,
+                         help="number of NACA/SolidWorks stations along the semi-span for an "
+                              "elliptical planform's loft (default 6); ignored for --planform linear")
     parser.add_argument("--sweep-deg", type=float, default=0.0,
                          help="leading-edge sweep angle, degrees (default 0); geometry-only, "
                               "only affects the --naca tip-plane placement note, not the mass estimate")
@@ -260,8 +311,9 @@ def main() -> None:
     result = optimize_wing(
         args.lift_mass_kg, args.cruise_mps, args.cl, args.min_ar, args.max_ar,
         args.max_span_m, args.areal_density_g_m2, args.ar_mass_exponent,
-        taper_ratio=args.taper_ratio,
+        taper_ratio=args.taper_ratio, planform=args.planform,
     )
+    elliptical = args.planform == "elliptical"
     tapered = args.taper_ratio != 1.0
     swept_or_twisted = args.sweep_deg != 0.0 or args.twist_deg != 0.0
 
@@ -269,10 +321,12 @@ def main() -> None:
     print(f"aspect_ratio:       {result['aspect_ratio']:.3f}"
           + ("" if result["span_capped"] else "  (unconstrained -- equals --min-ar; nothing in this model favors higher AR without a span cap)"))
     print(f"span_m:             {result['span_m']:.3f}")
-    print(f"chord_m:            {result['chord_m']:.3f}" + ("  (mean chord)" if tapered else ""))
-    if tapered:
+    print(f"chord_m:            {result['chord_m']:.3f}" + ("  (mean chord)" if tapered or elliptical else ""))
+    if tapered or elliptical:
         print(f"root_chord_m:       {result['root_chord_m']:.3f}")
         print(f"tip_chord_m:        {result['tip_chord_m']:.3f}")
+    if result["bending_relief_factor"] != 1.0:
+        print(f"bending_relief:     {result['bending_relief_factor']:.3f}x wing_mass_g vs. an untapered/rectangular wing")
     print(f"wing_mass_g:        {result['wing_mass_g']:.1f}")
     print(f"wing_loading_kg_m2: {result['wing_loading_kg_m2']:.2f}"
           + (f"  WARNING: exceeds {MAX_WING_LOADING_KG_M2:g} kg/m^2 sanity limit" if result["wing_loading_kg_m2"] > MAX_WING_LOADING_KG_M2 else ""))
@@ -300,7 +354,8 @@ def main() -> None:
                 "lift_mass_kg": args.lift_mass_kg, "cruise_mps": args.cruise_mps, "cl": args.cl,
                 "min_ar": args.min_ar, "max_ar": args.max_ar, "max_span_m": args.max_span_m,
                 "areal_density_g_m2": args.areal_density_g_m2, "ar_mass_exponent": args.ar_mass_exponent,
-                "taper_ratio": args.taper_ratio, "sweep_deg": args.sweep_deg, "twist_deg": args.twist_deg,
+                "taper_ratio": args.taper_ratio, "planform": args.planform,
+                "sweep_deg": args.sweep_deg, "twist_deg": args.twist_deg,
                 "naca": args.naca, "closed_te": not args.open_te,
             },
             "wing_area_m2": round(result["wing_area_m2"], 4),
@@ -310,6 +365,7 @@ def main() -> None:
             "root_chord_m": round(result["root_chord_m"], 4),
             "tip_chord_m": round(result["tip_chord_m"], 4),
             "wing_mass_g": round(result["wing_mass_g"], 2),
+            "bending_relief_factor": round(result["bending_relief_factor"], 4),
             "wing_loading_kg_m2": round(result["wing_loading_kg_m2"], 3),
         }
         records = []
@@ -352,7 +408,35 @@ def main() -> None:
             ]
             return out
 
-        if not tapered and not swept_or_twisted:
+        if elliptical:
+            n = max(args.elliptical_stations, 2)
+            half_span_mm = result["span_m"] / 2 * 1000
+            lines.append(
+                f"# Elliptical planform: {n} stations, lofted through all of them in order (a 2-station\n"
+                f"# loft can't approximate a continuously-curving edge). Place station i's sketch on a\n"
+                f"# plane offset i/{n - 1} * {half_span_mm:.2f} mm from the root plane along the span axis\n"
+                f"# only -- sweep is baked into each station's x(t) below instead."
+            )
+            lines.append("")
+            for i in range(n):
+                y_frac = i / (n - 1)
+                chord_m = elliptical_chord_m(y_frac, result["root_chord_m"])
+                if i == n - 1:
+                    # A literal y_frac=1 station has zero chord -- no airfoil curve exists there.
+                    # Nudge the last station in from the true tip so it still lofts to a real
+                    # (very small) profile; a practical build blends to a small square-cut tip
+                    # here rather than the mathematical point, same as real elliptical wings do.
+                    y_frac = 1.0 - 1e-3
+                    chord_m = elliptical_chord_m(y_frac, result["root_chord_m"])
+                twist_deg = args.twist_deg * y_frac
+                sweep_offset_mm = y_frac * half_span_mm * math.tan(math.radians(args.sweep_deg))
+                lines += station_block(f"S{i}", chord_m, twist_deg, sweep_offset_mm)
+            lines.append(
+                f"# Loft (Insert > Boss/Base > Loft) through all {n} station profiles in span order\n"
+                "# (upper+lower curves knitted into one contour each) to get the elliptical panel;\n"
+                "# mirror it about the root plane for the other half-span."
+            )
+        elif not tapered and not swept_or_twisted:
             lines.append(f"# Rectangular planform, same profile at root and tip -- one station needed.")
             lines += station_block("Root", result["chord_m"], 0.0, 0.0)
         else:

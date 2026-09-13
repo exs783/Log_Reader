@@ -5,6 +5,7 @@ import math
 from wing_optimizer import (
     required_wing_area_m2, wing_mass_g, optimize_wing, AR_REF,
     naca4_params, naca4_airfoil_point, solidworks_naca4_equations, rotate_about_pivot,
+    bending_relief_factor, elliptical_chord_m,
 )
 from Mission_Model import G, RHO_AIR
 
@@ -150,5 +151,76 @@ assert set(tip_eqs["global_variables"]) == {"tip_chord", "tip_naca_m", "tip_naca
 for expr in (tip_eqs["upper_x_of_t"], tip_eqs["upper_y_of_t"], tip_eqs["lower_x_of_t"], tip_eqs["lower_y_of_t"]):
     assert "tip_chord" in expr and "tip_twist" in expr
     assert "\"chord\"" not in expr
+
+# bending_relief_factor: a rectangular wing (taper_ratio=1) must get exactly
+# 1.0 -- today's mass model, unchanged -- derived from the root bending-
+# moment integral of a chord-proportional load: BM(lambda) ~ 1/2 - (1-lambda)/3,
+# normalized so BM(1) = 1.0.
+assert math.isclose(bending_relief_factor("linear", 1.0), 1.0, rel_tol=1e-12)
+assert math.isclose(bending_relief_factor("linear", 0.5), 2.0 / 3.0, rel_tol=1e-9)
+assert math.isclose(bending_relief_factor("linear", 0.0), 1.0 / 3.0, rel_tol=1e-9)
+# Elliptical loading's own bending-moment integral (BM ~ 1/3 vs rectangle's
+# 1/2) gives exactly 2/3 -- independent of any taper_ratio argument, and not
+# coincidentally close to the linear taper_ratio~0.5 industry rule of thumb
+# for approximating an elliptical load distribution.
+assert math.isclose(bending_relief_factor("elliptical", taper_ratio=1.0), 2.0 / 3.0, rel_tol=1e-12)
+assert math.isclose(bending_relief_factor("elliptical", taper_ratio=0.2), 2.0 / 3.0, rel_tol=1e-12)
+try:
+    bending_relief_factor("triangular", 1.0)
+    raise AssertionError("unknown planform should be rejected")
+except ValueError:
+    pass
+
+# wing_mass_g: bending_relief_factor multiplies straight through, default 1.0
+# (today's behavior, unaffected by this new parameter).
+base_mass = wing_mass_g(area_m2=2.0, aspect_ratio=AR_REF, areal_density_g_m2=1500.0, ar_mass_exponent=0.5)
+relieved_mass = wing_mass_g(area_m2=2.0, aspect_ratio=AR_REF, areal_density_g_m2=1500.0, ar_mass_exponent=0.5,
+                             bending_relief_factor=0.5)
+assert math.isclose(relieved_mass, 0.5 * base_mass, rel_tol=1e-12)
+
+# optimize_wing: taper_ratio=1.0 (the default) must give the exact same
+# wing_mass_g as before this feature existed -- a rectangular wing's bending
+# relief factor is 1.0, so nothing here should move for anyone's existing config.
+rect = optimize_wing(lift_mass_kg=12.0, cruise_mps=25.0, cl=0.6, min_ar=4.0, max_ar=10.0,
+                      max_span_m=None, areal_density_g_m2=1500.0, ar_mass_exponent=0.5)
+assert math.isclose(rect["wing_mass_g"], 1500.0 * rect["wing_area_m2"] * (4.0 / AR_REF) ** 0.5, rel_tol=1e-9)
+
+# optimize_wing: taper_ratio=0.5 should now reduce wing_mass_g by exactly its
+# bending_relief_factor relative to the untapered wing at the same AR/area
+# (both hit min_ar=4 unconstrained, so AR/area are identical between the two).
+tapered_relief = optimize_wing(lift_mass_kg=12.0, cruise_mps=25.0, cl=0.6, min_ar=4.0, max_ar=10.0,
+                                max_span_m=None, areal_density_g_m2=1500.0, ar_mass_exponent=0.5, taper_ratio=0.5)
+assert math.isclose(tapered_relief["wing_mass_g"], rect["wing_mass_g"] * bending_relief_factor("linear", 0.5),
+                     rel_tol=1e-9)
+
+# elliptical_chord_m: root (y_frac=0) is the max chord, tip (y_frac=1) is
+# zero, and the chord distribution integrates back to the original area
+# (area = (pi/4) * root_chord * span for a true ellipse).
+root_chord = elliptical_chord_m(0.0, root_chord_m=4.0)
+tip_chord = elliptical_chord_m(1.0, root_chord_m=4.0)
+assert math.isclose(root_chord, 4.0, rel_tol=1e-12)
+assert math.isclose(tip_chord, 0.0, abs_tol=1e-9)
+mid_chord = elliptical_chord_m(0.6, root_chord_m=4.0)
+assert math.isclose(mid_chord, 4.0 * math.sqrt(1 - 0.6**2), rel_tol=1e-12)
+
+# optimize_wing: elliptical planform. root_chord_m/span_m must satisfy the
+# ellipse-area identity, tip_chord_m must be 0, and the mass must carry the
+# elliptical bending_relief_factor (2/3) rather than the linear-taper one.
+ell = optimize_wing(lift_mass_kg=12.0, cruise_mps=25.0, cl=0.6, min_ar=4.0, max_ar=10.0,
+                     max_span_m=None, areal_density_g_m2=1500.0, ar_mass_exponent=0.5, planform="elliptical")
+assert math.isclose(ell["wing_area_m2"], rect["wing_area_m2"], rel_tol=1e-9), "planform must not change required area"
+assert math.isclose(ell["tip_chord_m"], 0.0, abs_tol=1e-9)
+assert math.isclose(math.pi / 4 * ell["root_chord_m"] * ell["span_m"], ell["wing_area_m2"], rel_tol=1e-9)
+assert math.isclose(ell["wing_mass_g"], rect["wing_mass_g"] * bending_relief_factor("elliptical", 1.0), rel_tol=1e-9)
+
+# elliptical planform + an explicit taper_ratio is a contradiction (a true
+# ellipse's tip/root ratio is fixed at 0, not user-chosen) -- must be rejected.
+try:
+    optimize_wing(lift_mass_kg=12.0, cruise_mps=25.0, cl=0.6, min_ar=4.0, max_ar=10.0,
+                   max_span_m=None, areal_density_g_m2=1500.0, ar_mass_exponent=0.5,
+                   planform="elliptical", taper_ratio=0.5)
+    raise AssertionError("elliptical planform with a non-default taper_ratio should be rejected")
+except ValueError:
+    pass
 
 print("wing_optimizer self-check: all assertions passed")
