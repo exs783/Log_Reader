@@ -7,8 +7,15 @@ from wing_optimizer import (
     naca4_params, naca4_airfoil_point, solidworks_naca4_equations, rotate_about_pivot,
     bending_relief_factor, elliptical_chord_m,
     parse_selig_dat, place_station_points, wing_stations,
+    oswald_efficiency, induced_drag_coefficient, optimize_wing_drag,
+    G as WING_OPT_G, RHO_AIR as WING_OPT_RHO_AIR,
 )
 from Mission_Model import G, RHO_AIR
+
+# wing_optimizer.py duplicates G/RHO_AIR instead of importing Mission_Model.py
+# (keeps it a standalone script) -- guard against the copies drifting apart.
+assert WING_OPT_G == G and WING_OPT_RHO_AIR == RHO_AIR, \
+    "wing_optimizer.py's duplicated physics constants have drifted from Mission_Model.py's"
 
 # required_wing_area_m2: invert the lift equation by hand and check round-trip.
 area = required_wing_area_m2(lift_mass_kg=12.0, cruise_mps=25.0, cl=0.6)
@@ -300,5 +307,59 @@ for a, b in zip(ell_stations, ell_stations[1:]):
     assert b["chord_m"] < a["chord_m"], "chord must strictly decrease root to tip on an ellipse"
     assert b["twist_deg"] < a["twist_deg"], "twist should ramp toward the (negative) tip value"
     assert b["sweep_offset_mm"] > a["sweep_offset_mm"]
+
+# oswald_efficiency: sweep=0 should reproduce the bare formula, and sweep
+# only enters through cos(sweep)^0.15 -- monotonically decreasing for
+# 0 <= sweep < 90 deg, so adding sweep must lower e0 a bit, never raise it.
+ar = 8.0
+e0_unswept = oswald_efficiency(ar)
+assert math.isclose(e0_unswept, 4.61 * (1 - 0.045 * ar**0.68) - 3.1, rel_tol=1e-12)
+e0_swept = oswald_efficiency(ar, sweep_deg=20.0)
+assert e0_swept < e0_unswept, "sweep should reduce the Oswald efficiency estimate"
+
+# induced_drag_coefficient: doubling cl should quadruple cdi (cl^2 term);
+# doubling AR should halve it (linear denominator).
+cdi = induced_drag_coefficient(cl=0.5, aspect_ratio=8.0, oswald_e=0.8)
+assert math.isclose(induced_drag_coefficient(cl=1.0, aspect_ratio=8.0, oswald_e=0.8), 4 * cdi, rel_tol=1e-9)
+assert math.isclose(induced_drag_coefficient(cl=0.5, aspect_ratio=16.0, oswald_e=0.8), cdi / 2, rel_tol=1e-9)
+
+# optimize_wing_drag: cl_min <= cl_max <= 0 must be rejected.
+try:
+    optimize_wing_drag(lift_mass_kg=12.0, cruise_mps=25.0, cl_min=0.6, cl_max=0.3,
+                        min_ar=4.0, max_ar=10.0, max_span_m=None, parasite_cd0=0.045)
+    raise AssertionError("cl_max <= cl_min should be rejected")
+except ValueError:
+    pass
+
+# optimize_wing_drag: the winning combo must actually be the drag minimum
+# over the searched grid (brute-force check against every combo), must
+# satisfy the lift equation at its own cl, and must respect the span cap.
+drag_best = optimize_wing_drag(lift_mass_kg=12.0, cruise_mps=25.0, cl_min=0.3, cl_max=1.0,
+                                min_ar=4.0, max_ar=12.0, max_span_m=None, parasite_cd0=0.045,
+                                cl_steps=40, ar_steps=40)
+for ci in range(41):
+    cl = 0.3 + 0.7 * ci / 40
+    area = required_wing_area_m2(12.0, 25.0, cl)
+    for ai in range(41):
+        ar = 4.0 + 8.0 * ai / 40
+        e0 = oswald_efficiency(ar)
+        cdi = induced_drag_coefficient(cl, ar, e0)
+        drag_n = 0.5 * RHO_AIR * 25.0 * 25.0 * area * (0.045 + cdi)
+        assert drag_n >= drag_best["drag_n"] - 1e-9, "optimize_wing_drag didn't find the grid's true minimum"
+lift_n = 0.5 * RHO_AIR * drag_best["cl"] * drag_best["wing_area_m2"] * 25.0 * 25.0
+assert math.isclose(lift_n, 12.0 * G, rel_tol=1e-6), "chosen (cl, area) must still satisfy the lift equation"
+
+capped_drag = optimize_wing_drag(lift_mass_kg=12.0, cruise_mps=25.0, cl_min=0.3, cl_max=1.0,
+                                  min_ar=4.0, max_ar=12.0, max_span_m=3.0, parasite_cd0=0.045)
+assert capped_drag["span_m"] <= 3.0 + 1e-6
+
+# optimize_wing_drag: taper isn't a param of the drag search itself (same as
+# optimize_wing() -- it's applied afterward), so a rectangular vs. a tapered
+# call with identical other args must return the exact same drag optimum.
+rect_drag = optimize_wing_drag(lift_mass_kg=12.0, cruise_mps=25.0, cl_min=0.3, cl_max=1.0,
+                                min_ar=4.0, max_ar=12.0, max_span_m=None, parasite_cd0=0.045,
+                                cl_steps=40, ar_steps=40)
+assert rect_drag["cl"] == drag_best["cl"] and rect_drag["aspect_ratio"] == drag_best["aspect_ratio"], \
+    "optimize_wing_drag doesn't take a taper_ratio -- main() applies it after the fact, mirroring optimize_wing()"
 
 print("wing_optimizer self-check: all assertions passed")

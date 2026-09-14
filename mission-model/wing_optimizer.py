@@ -1,32 +1,47 @@
 """Wing sizing/optimization for a winged VTOL, in the vechicle_configs convention
-(wing_area_m2 / wing_cl). Run: python wing_optimizer.py --lift-mass-kg 12 --cruise-mps 25 --cl 0.6
+(wing_area_m2 / wing_cl). Standalone -- no import dependency on Mission_Model.py.
+Run: python wing_optimizer.py --lift-mass-kg 12 --cruise-mps 25 --cl 0.6
 
-The wing area is not a free variable -- it's fixed by the lift equation given
-the required lift, cruise speed, and lift coefficient (all inputs, matching
-how Mission_Model.py's VehicleType.wing_cl is a fixed per-aircraft constant,
-not something solved for). The only free variable is aspect ratio: higher AR
-means a longer, thinner wing for the same area, which is more structurally
-demanding (longer bending moment arm) but not modeled elsewhere in this repo.
-This script grid-searches AR in a user-given range and picks the one that
-minimizes estimated structural mass, subject to an optional max-span cap
-(e.g. a trailer/hangar width limit). Without a binding span cap, the answer
-is always the lowest allowed AR -- there's no other force pushing AR up in
-this simple mass model, and the script says so rather than dressing up a
-constant as an optimum.
+Two objectives (--objective):
+
+  mass (default): the wing area is not a free variable -- it's fixed by the
+  lift equation given the required lift, cruise speed, and lift coefficient
+  (all inputs, matching how Mission_Model.py's VehicleType.wing_cl is a fixed
+  per-aircraft constant, not something solved for). The only free variable is
+  aspect ratio: higher AR means a longer, thinner wing for the same area,
+  which is more structurally demanding (longer bending moment arm). This
+  grid-searches AR in a user-given range and picks the one that minimizes
+  estimated structural mass, subject to an optional max-span cap (e.g. a
+  trailer/hangar width limit). Without a binding span cap, the answer is
+  always the lowest allowed AR -- there's no other force pushing AR up in
+  this simple mass model, and the script says so rather than dressing up a
+  constant as an optimum.
+
+  drag: cl is *also* free (search --cl-min/--cl-max instead of a fixed
+  --cl), searched jointly with aspect ratio to minimize total cruise drag
+  (parasite + induced, via a Raymer-style Oswald-efficiency estimate) --
+  higher AR now has a real reason to win (it lowers induced drag), not just
+  a structural cost. --taper-ratio is supported (same bending-relief effect
+  as the mass objective); --planform elliptical and --naca/--airfoil-dat
+  export aren't wired into this objective yet.
 
 Pass --naca (a 4-digit code, e.g. 2412) to also print SolidWorks Equation
 Driven Curve equations for that airfoil at the optimized chord -- paste-ready
 global variables plus parametric x(t)/y(t) for the upper and lower surfaces.
+--out writes a complete, directly loadable VehicleType entry (see
+--num-rotors/--base-mass-g/etc.) to a vehicle_configs-style JSON file.
 """
 
 import argparse
 import json
 import math
 import os
-import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from Mission_Model import G, RHO_AIR
+# Duplicated (not imported) from Mission_Model.py so this script has zero
+# dependency on it -- keep these two in sync by hand if Mission_Model.py's
+# ever change (test_wing_optimizer.py cross-checks them against it).
+G = 9.807  # m/s^2
+RHO_AIR = 1.225  # kg/m^3
 
 # Same sanity ceiling vechicle_configs/README.md checks existing wings against:
 # <=20 psf, i.e. wing loading (weight/area) shouldn't exceed ~97.65 kg/m^2.
@@ -356,11 +371,91 @@ def optimize_wing(lift_mass_kg: float, cruise_mps: float, cl: float, min_ar: flo
     return best
 
 
+def oswald_efficiency(aspect_ratio: float, sweep_deg: float = 0.0) -> float:
+    """Raymer's empirical Oswald efficiency estimate for a straight or
+    moderately swept subsonic wing -- the same formula
+    MyProjectsMK/Wing_optimization uses for its drag-minimizing sizing:
+    e0 = 4.61*(1 - 0.045*AR^0.68)*cos(sweep)^0.15 - 3.1. Not meant for
+    delta/highly-swept planforms.
+    """
+    return 4.61 * (1 - 0.045 * aspect_ratio**0.68) * math.cos(math.radians(sweep_deg)) ** 0.15 - 3.1
+
+
+def induced_drag_coefficient(cl: float, aspect_ratio: float, oswald_e: float) -> float:
+    return cl * cl / (math.pi * aspect_ratio * oswald_e)
+
+
+def optimize_wing_drag(lift_mass_kg: float, cruise_mps: float, cl_min: float, cl_max: float,
+                        min_ar: float, max_ar: float, max_span_m: float | None,
+                        parasite_cd0: float, sweep_deg: float = 0.0,
+                        cl_steps: int = 100, ar_steps: int = 100) -> dict:
+    """Grid-search (cl, aspect_ratio) jointly to minimize total cruise drag
+    (parasite + induced, via oswald_efficiency()) -- the aerodynamic-depth
+    counterpart to optimize_wing()'s structural-mass objective. Unlike
+    optimize_wing(), cl isn't a fixed input here: it trades off against area
+    through the lift equation (higher cl -> smaller area -> less parasite
+    drag) and against induced drag directly (cdi ~ cl^2/AR), so both are
+    free variables. cl_max both bounds the search and acts as the
+    stall-margin ceiling -- keep it below the airfoil's real Cl_max with
+    whatever margin you want; this does no separate stall check.
+    """
+    if cl_min <= 0.0 or cl_max <= cl_min:
+        raise ValueError(f"need 0 < cl_min < cl_max, got cl_min={cl_min}, cl_max={cl_max}")
+
+    best = None
+    for ci in range(cl_steps + 1):
+        cl = cl_min + (cl_max - cl_min) * ci / cl_steps
+        area_m2 = required_wing_area_m2(lift_mass_kg, cruise_mps, cl)
+        for ai in range(ar_steps + 1):
+            ar = min_ar + (max_ar - min_ar) * ai / ar_steps
+            span_m = math.sqrt(ar * area_m2)
+            if max_span_m is not None and span_m > max_span_m:
+                continue
+            e0 = oswald_efficiency(ar, sweep_deg)
+            cdi = induced_drag_coefficient(cl, ar, e0)
+            drag_n = 0.5 * RHO_AIR * cruise_mps * cruise_mps * area_m2 * (parasite_cd0 + cdi)
+            if best is None or drag_n < best["drag_n"]:
+                best = {
+                    "cl": cl, "aspect_ratio": ar, "span_m": span_m, "wing_area_m2": area_m2,
+                    "oswald_efficiency": e0, "induced_cd": cdi, "parasite_cd0": parasite_cd0, "drag_n": drag_n,
+                }
+
+    if best is None:
+        raise ValueError(
+            f"no (cl, aspect_ratio) combination in cl=[{cl_min}, {cl_max}] x AR=[{min_ar}, {max_ar}] "
+            f"keeps span <= {max_span_m} m for lift_mass_kg={lift_mass_kg} -- raise --max-span-m, "
+            f"raise --cl-max (smaller required area), or lower --min-ar."
+        )
+
+    best["chord_m"] = best["wing_area_m2"] / best["span_m"]
+    best["wing_loading_kg_m2"] = lift_mass_kg / best["wing_area_m2"]
+    best["span_capped"] = max_span_m is not None and best["aspect_ratio"] < max_ar - 1e-9
+    return best
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--lift-mass-kg", type=float, required=True, help="weight the wing must offload from the rotors, kg")
     parser.add_argument("--cruise-mps", type=float, required=True, help="cruise airspeed the wing is sized for, m/s")
-    parser.add_argument("--cl", type=float, required=True, help="lift coefficient at cruise attitude (matches vehicle_configs wing_cl)")
+    parser.add_argument("--cl", type=float, default=None,
+                         help="lift coefficient at cruise attitude (matches vehicle_configs wing_cl); "
+                              "required for --objective mass, not accepted for --objective drag (there cl "
+                              "is a search variable -- use --cl-min/--cl-max instead)")
+    parser.add_argument("--objective", choices=["mass", "drag"], default="mass",
+                         help="what to optimize (default mass): 'mass' fixes --cl and searches aspect ratio "
+                              "for minimum structural mass (today's behavior); 'drag' searches --cl-min.."
+                              "--cl-max and aspect ratio jointly for minimum total cruise drag (parasite + "
+                              "induced, via an Oswald-efficiency estimate); --taper-ratio is supported, "
+                              "not combinable with --planform elliptical, --naca, or --airfoil-dat")
+    parser.add_argument("--cl-min", type=float, default=None, help="lowest lift coefficient to search (--objective drag only)")
+    parser.add_argument("--cl-max", type=float, default=None,
+                         help="highest lift coefficient to search (--objective drag only) -- also doubles as "
+                              "the stall-margin ceiling, so keep it below the airfoil's real Cl_max with "
+                              "whatever margin you want")
+    parser.add_argument("--parasite-cd0", type=float, default=0.045,
+                         help="zero-lift drag coefficient referenced to wing area, matching Mission_Model.py's "
+                              "VehicleType.parasite_cd0 default (default 0.045); drives --objective drag's "
+                              "drag estimate and is written into --out's vehicle entry when non-default")
     parser.add_argument("--min-ar", type=float, default=4.0, help="lowest aspect ratio to consider (default 4)")
     parser.add_argument("--max-ar", type=float, default=10.0, help="highest aspect ratio to consider (default 10)")
     parser.add_argument("--max-span-m", type=float, default=None, help="optional wingspan cap, e.g. a transport/storage limit")
@@ -370,6 +465,11 @@ def main() -> None:
                          help="how fast structural mass grows with aspect ratio above the reference (default 0.5, an estimate)")
     parser.add_argument("--name", default="OptimizedWing", help="name field for the emitted JSON entry")
     parser.add_argument("--out", default=None, help="optional path to a vehicle_configs-style JSON file to append the result to")
+    parser.add_argument("--num-rotors", type=int, default=None, help="VehicleType.num_rotors for the --out entry (required if --out is given)")
+    parser.add_argument("--base-mass-g", type=float, default=None, help="VehicleType.base_mass_g for the --out entry (required if --out is given)")
+    parser.add_argument("--arm-mass-g", type=float, default=0.0, help="VehicleType.arm_mass_g for the --out entry (default 0.0, matching VehicleType's own default)")
+    parser.add_argument("--drag-cd", type=float, default=1.28, help="VehicleType.drag_cd for the --out entry (default 1.28, matching VehicleType's own default)")
+    parser.add_argument("--max-speed-mps", type=float, default=18.0, help="VehicleType.max_speed_mps for the --out entry (default 18.0, matching Mission_Model.py's DEFAULT_MAX_SPEED_MPS)")
     parser.add_argument("--naca", default=None,
                          help="4-digit NACA code (e.g. 2412) -- if given, also emits SolidWorks "
                               "Equation Driven Curve equations for the airfoil at the optimized chord. "
@@ -411,29 +511,68 @@ def main() -> None:
                          help="path to a JSON file recording this run's full wing geometry (span/chord/AR/"
                               "taper/sweep/twist/NACA/inputs), keyed by --name -- reruns with the same --name "
                               "overwrite that entry rather than piling up duplicates (default wing_geometry.json "
-                              "in the current directory). --out's vehicle_configs entry only ever carries "
-                              "wing_area_m2/wing_cl (VehicleType's loader rejects any other field), so this is "
-                              "the only record of the rest -- keep it OUT of a vehicle_configs folder, since "
-                              "Mission_Model.py's load_vehicle_types() globs every *.json there and expects each "
-                              "entry to be a full VehicleType. Pass an empty string to skip writing it")
+                              "in the current directory); --out's vehicle_configs entry is a complete VehicleType "
+                              "on its own (see --num-rotors etc.) but doesn't carry aspect_ratio/span/chord/NACA/"
+                              "bending-relief, so this is the only record of those -- keep it OUT of a "
+                              "vehicle_configs folder, since Mission_Model.py's load_vehicle_types() globs every "
+                              "*.json there and expects each entry to be a full VehicleType. Pass an empty string "
+                              "to skip writing it")
     args = parser.parse_args()
     if args.naca and args.airfoil_dat:
         parser.error("--naca and --airfoil-dat are alternatives -- pass one, not both")
     if args.airfoil_dat and not args.curve_points_out_dir:
         parser.error("--airfoil-dat needs --curve-points-out-dir to write its station point files to")
+    if args.objective == "mass":
+        if args.cl is None:
+            parser.error("--cl is required for --objective mass")
+    else:
+        if args.cl_min is None or args.cl_max is None:
+            parser.error("--cl-min and --cl-max are required for --objective drag (cl is a search variable there, not fixed)")
+        if args.planform == "elliptical" or args.naca or args.airfoil_dat:
+            parser.error("--objective drag only supports a linear (rectangular/tapered) planform today -- "
+                          "drop --planform elliptical / --naca / --airfoil-dat")
+    if args.taper_ratio <= 0.0:
+        parser.error(f"--taper-ratio must be > 0 (tip_chord/root_chord), got {args.taper_ratio}")
+    if args.out and (args.num_rotors is None or args.base_mass_g is None):
+        parser.error("--num-rotors and --base-mass-g are required with --out -- VehicleType can't load an entry without them")
 
-    result = optimize_wing(
-        args.lift_mass_kg, args.cruise_mps, args.cl, args.min_ar, args.max_ar,
-        args.max_span_m, args.areal_density_g_m2, args.ar_mass_exponent,
-        taper_ratio=args.taper_ratio, planform=args.planform,
-    )
+    if args.objective == "mass":
+        result = optimize_wing(
+            args.lift_mass_kg, args.cruise_mps, args.cl, args.min_ar, args.max_ar,
+            args.max_span_m, args.areal_density_g_m2, args.ar_mass_exponent,
+            taper_ratio=args.taper_ratio, planform=args.planform,
+        )
+        cl_used = args.cl
+    else:
+        result = optimize_wing_drag(
+            args.lift_mass_kg, args.cruise_mps, args.cl_min, args.cl_max, args.min_ar, args.max_ar,
+            args.max_span_m, args.parasite_cd0, sweep_deg=args.sweep_deg,
+        )
+        cl_used = result["cl"]
+        # Taper isn't fed into the drag search itself (this model's induced-drag
+        # estimate doesn't depend on taper, same as optimize_wing()'s mass search
+        # doesn't feed taper into AR) -- it's applied after the fact to split the
+        # winning mean chord into root/tip and to relieve the mass estimate, same
+        # math optimize_wing() uses for its own taper_ratio handling.
+        relief = bending_relief_factor("linear", args.taper_ratio)
+        result["wing_mass_g"] = wing_mass_g(result["wing_area_m2"], result["aspect_ratio"],
+                                             args.areal_density_g_m2, args.ar_mass_exponent, bending_relief_factor=relief)
+        result["planform"] = "linear"
+        result["taper_ratio"] = args.taper_ratio
+        result["bending_relief_factor"] = relief
+        result["root_chord_m"] = 2 * result["chord_m"] / (1 + args.taper_ratio)
+        result["tip_chord_m"] = args.taper_ratio * result["root_chord_m"]
+
     elliptical = args.planform == "elliptical"
     tapered = args.taper_ratio != 1.0
     swept_or_twisted = args.sweep_deg != 0.0 or args.twist_deg != 0.0
 
+    if args.objective == "drag":
+        print(f"cl (chosen):        {result['cl']:.4f}   (searched {args.cl_min:g} to {args.cl_max:g})")
     print(f"wing_area_m2:       {result['wing_area_m2']:.4f}")
     print(f"aspect_ratio:       {result['aspect_ratio']:.3f}"
-          + ("" if result["span_capped"] else "  (unconstrained -- equals --min-ar; nothing in this model favors higher AR without a span cap)"))
+          + ("" if result["span_capped"] or args.objective == "drag"
+             else "  (unconstrained -- equals --min-ar; nothing in this model favors higher AR without a span cap)"))
     print(f"span_m:             {result['span_m']:.3f}")
     print(f"chord_m:            {result['chord_m']:.3f}" + ("  (mean chord)" if tapered or elliptical else ""))
     if tapered or elliptical:
@@ -444,13 +583,25 @@ def main() -> None:
     print(f"wing_mass_g:        {result['wing_mass_g']:.1f}")
     print(f"wing_loading_kg_m2: {result['wing_loading_kg_m2']:.2f}"
           + (f"  WARNING: exceeds {MAX_WING_LOADING_KG_M2:g} kg/m^2 sanity limit" if result["wing_loading_kg_m2"] > MAX_WING_LOADING_KG_M2 else ""))
+    if args.objective == "drag":
+        print(f"oswald_efficiency:  {result['oswald_efficiency']:.4f}")
+        print(f"induced_cd:         {result['induced_cd']:.5f}")
+        print(f"parasite_cd0:       {result['parasite_cd0']:.4f}")
+        print(f"drag_n:             {result['drag_n']:.4f}   (at cruise, parasite + induced)")
     if args.sweep_deg:
         print(f"sweep_deg (LE):     {args.sweep_deg:.2f}")
     if args.twist_deg:
         print(f"twist_deg (tip):    {args.twist_deg:.2f}")
 
     if args.out:
-        entry = {"name": args.name, "wing_area_m2": round(result["wing_area_m2"], 4), "wing_cl": args.cl}
+        entry = {
+            "name": args.name, "num_rotors": args.num_rotors, "base_mass_g": args.base_mass_g,
+            "arm_mass_g": args.arm_mass_g, "drag_cd": args.drag_cd,
+            "wing_area_m2": round(result["wing_area_m2"], 4), "wing_cl": round(cl_used, 4),
+            "max_speed_mps": args.max_speed_mps,
+        }
+        if args.parasite_cd0 != 0.045:
+            entry["parasite_cd0"] = args.parasite_cd0
         entries = []
         if os.path.exists(args.out):
             with open(args.out) as f:
@@ -465,7 +616,9 @@ def main() -> None:
         record = {
             "name": args.name,
             "inputs": {
-                "lift_mass_kg": args.lift_mass_kg, "cruise_mps": args.cruise_mps, "cl": args.cl,
+                "lift_mass_kg": args.lift_mass_kg, "cruise_mps": args.cruise_mps, "cl": round(cl_used, 4),
+                "objective": args.objective, "cl_min": args.cl_min, "cl_max": args.cl_max,
+                "parasite_cd0": args.parasite_cd0,
                 "min_ar": args.min_ar, "max_ar": args.max_ar, "max_span_m": args.max_span_m,
                 "areal_density_g_m2": args.areal_density_g_m2, "ar_mass_exponent": args.ar_mass_exponent,
                 "taper_ratio": args.taper_ratio, "planform": args.planform,
