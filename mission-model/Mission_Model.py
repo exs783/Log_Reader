@@ -106,6 +106,8 @@ from scipy.integrate import solve_ivp
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import brentq
 
+import dynamics_6dof
+
 # ---------------------------------------------------------------------------
 # Assumptions and parameters
 # ---------------------------------------------------------------------------
@@ -270,6 +272,16 @@ class VehicleType:
     # draggy UAVs with exposed motor pods/struts run ~0.06); ignored when
     # wing_area_m2 is 0.
     parasite_cd0: float = 0.045
+    # -- Tailsitter transition dynamics (dynamics_6dof.py) -- all optional;
+    # 0.0/None means "estimate from what's already here," matching this
+    # model's other geometry defaults. Only read when wing_area_m2 > 0
+    # (has_wing) -- a wingless vehicle never touches these.
+    wing_span_m: float = 0.0  # 0 -> estimate as sqrt(6 * wing_area_m2), AR=6 assumed
+    body_length_m: float = 0.0  # 0 -> estimate as 2 prop diameters
+    inertia_kg_m2: tuple[float, float, float] | None = None  # (Ixx, Iyy, Izz); None -> geometric estimate
+    max_control_torque_n_m: tuple[float, float, float] | None = None  # (roll, pitch, yaw) N*m; None -> geometric estimate
+    attitude_kp: float = 4.0  # transition attitude-control proportional gain
+    attitude_kd: float = 2.0  # transition attitude-control derivative gain
 
 
 # Reproduces the original MATLAB model's single hard-coded airframe.
@@ -523,6 +535,25 @@ def parasite_drag_area_m2(vehicle: VehicleType) -> float:
     return vehicle.parasite_cd0 * vehicle.wing_area_m2 / vehicle.drag_cd
 
 
+def _resolved_body_length_m(vehicle: VehicleType, cfg: MotorPropConfig) -> float:
+    """vehicle.body_length_m if set, else a crude nose-to-tail estimate (2
+    prop diameters) -- good enough for dynamics_6dof.py's coarse
+    inertia/torque estimates. See VehicleType.body_length_m."""
+    if vehicle.body_length_m > 0.0:
+        return vehicle.body_length_m
+    return 2.0 * cfg.prop_diameter_in * 0.0254
+
+
+def _resolved_wing_span_m(vehicle: VehicleType) -> float:
+    """vehicle.wing_span_m if set, else sqrt(6 * wing_area_m2) (AR=6
+    assumed). See VehicleType.wing_span_m."""
+    if vehicle.wing_span_m > 0.0:
+        return vehicle.wing_span_m
+    if vehicle.wing_area_m2 <= 0.0:
+        return 0.0
+    return math.sqrt(6.0 * vehicle.wing_area_m2)
+
+
 def _effective_area_at(thrust_n: float, weight_n: float, base_area_m2: float, lift_fn, v: float,
                         parasite_area_m2: float = 0.0) -> float:
     """Frontal area inflated by the forward tilt needed to support
@@ -606,61 +637,6 @@ def _accel_phase_closed_form(a0: float, kk: float, v0: float, v_target: float, d
     v = v_t * math.tanh(u)
     x = (_log_cosh(u) - _log_cosh(c0)) / kk
     return t, x, v
-
-
-def _accel_phase_numeric(thrust_n: float, weight_n: float, base_area_m2: float, cd: float,
-                          mass_kg: float, lift_fn, v0: float, v_target: float, distance_cap: float,
-                          parasite_area_m2: float = 0.0):
-    """Numeric fallback for winged vehicles: wing lift makes thrust_horizontal
-    (and the tilt-inflated drag area) a function of v, so dv/dt is no longer
-    the simple Riccati form the closed-form solver handles."""
-    effective_weight0 = max(weight_n - lift_fn(v0), 0.0)
-    if math.sqrt(max(thrust_n * thrust_n - effective_weight0 * effective_weight0, 0.0)) <= 0:
-        return None
-
-    def rhs(_t, state):
-        _x, v = state
-        area = _effective_area_at(thrust_n, weight_n, base_area_m2, lift_fn, v, parasite_area_m2)
-        effective_weight_n = max(weight_n - lift_fn(v), 0.0)
-        thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - effective_weight_n * effective_weight_n, 0.0))
-        drag_n = 0.5 * RHO_AIR * cd * area * v * v
-        return [v, (thrust_horizontal_n - drag_n) / mass_kg]
-
-    def hit_target_v(_t, state):
-        return state[1] - v_target
-
-    hit_target_v.terminal = True
-    hit_target_v.direction = 1
-
-    def hit_distance(_t, state):
-        return state[0] - distance_cap
-
-    hit_distance.terminal = True
-    hit_distance.direction = 1
-
-    sol = solve_ivp(rhs, [0.0, 300.0], [0.0, v0], events=[hit_target_v, hit_distance],
-                     max_step=0.5, rtol=1e-7, atol=1e-9)
-    if sol.t_events[0].size == 0 and sol.t_events[1].size == 0:
-        return None  # stalled: never reached cruise speed or the distance cap
-    return sol.t[-1], sol.y[0, -1], sol.y[1, -1]
-
-
-def _accel_phase(thrust_n: float, weight_n: float, base_area_m2: float, cd: float, mass_kg: float,
-                  lift_fn, has_wing: bool, v0: float, v_target: float, distance_cap: float,
-                  parasite_area_m2: float = 0.0):
-    if not has_wing:
-        # No wing means no wing drag either -- parasite_area_m2 is always 0
-        # here (parasite_drag_area_m2() zeroes it via wing_area_m2), so
-        # nothing to add to the closed-form wingless path.
-        thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - weight_n * weight_n, 0.0))
-        if thrust_horizontal_n <= 0:
-            return None
-        effective_area = base_area_m2 * (thrust_n / thrust_horizontal_n)
-        kk = 0.5 * RHO_AIR * cd * effective_area / mass_kg
-        a0 = thrust_horizontal_n / mass_kg
-        return _accel_phase_closed_form(a0, kk, v0, v_target, distance_cap)
-    return _accel_phase_numeric(thrust_n, weight_n, base_area_m2, cd, mass_kg, lift_fn, v0, v_target, distance_cap,
-                                 parasite_area_m2)
 
 
 def _decel_phase(kk: float, v0: float, v_floor: float, distance_cap: float):
@@ -789,22 +765,59 @@ def segment(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery,
     # says -- there's a structural/control-authority/regulatory speed limit).
     v_target = min(CRUISE_V_FRACTION * v_eq, vehicle.max_speed_mps)
 
-    accel = _accel_phase(thrust_n, weight_n, base_area, vehicle.drag_cd, mass_kg, lift_fn, has_wing,
-                          v0=1.0, v_target=v_target, distance_cap=distance_m / 2,
-                          parasite_area_m2=parasite_area)
-    if accel is None:
-        return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
-    t_acc, x_acc, v_cruise = accel
+    if has_wing:
+        # Tailsitter transition: real quaternion 6DOF attitude integration
+        # instead of the tilt-area trick (see dynamics_6dof.py and
+        # docs/superpowers/specs/2026-09-15-quaternion-6dof-transition-design.md).
+        body_length_m = _resolved_body_length_m(vehicle, cfg)
+        wing_span_m = _resolved_wing_span_m(vehicle)
+        inertia_kg_m2 = vehicle.inertia_kg_m2 or dynamics_6dof.estimate_inertia_kg_m2(
+            mass_kg, body_length_m, wing_span_m)
+        thrust_min_n = cfg.thrust_g(THROTTLE_MIN) / 1000.0 * G
+        thrust_max_n = cfg.thrust_g(THROTTLE_MAX) / 1000.0 * G
+        max_torque_n_m = vehicle.max_control_torque_n_m or dynamics_6dof.estimate_max_torque_n_m(
+            thrust_min_n, thrust_max_n, body_length_m, wing_span_m)
 
-    # Decel is powered braking (rotors tilted the other way), not a coast:
-    # use the tilt-area and forward-thrust magnitude as of hand-off speed
-    # (both equal the constant accel-phase values when there's no wing).
-    decel_area = _effective_area_at(thrust_n, weight_n, base_area, lift_fn, v_cruise, parasite_area)
-    kk_decel = 0.5 * RHO_AIR * vehicle.drag_cd * decel_area / mass_kg
-    effective_weight_cruise_n = max(weight_n - lift_fn(v_cruise), 0.0)
-    thrust_horizontal_decel_n = math.sqrt(max(thrust_n * thrust_n - effective_weight_cruise_n * effective_weight_cruise_n, 0.0))
-    a0_decel = thrust_horizontal_decel_n / mass_kg
-    t_dec, x_dec, _v_end = _decel_phase_powered(a0_decel, kk_decel, v_cruise, v_floor=1.0, distance_cap=distance_m / 2)
+        accel = dynamics_6dof.transition_accel(
+            mass_kg=mass_kg, weight_n=weight_n, thrust_n=thrust_n, drag_cd=vehicle.drag_cd,
+            base_area_m2=base_area, lift_fn=lift_fn, parasite_area_m2=parasite_area,
+            inertia_kg_m2=inertia_kg_m2, max_torque_n_m=max_torque_n_m,
+            kp=vehicle.attitude_kp, kd=vehicle.attitude_kd,
+            v0=1.0, v_target=v_target, distance_cap=distance_m / 2)
+        if accel is None:
+            return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+        t_acc, x_acc, v_cruise = accel
+
+        decel = dynamics_6dof.transition_decel(
+            mass_kg=mass_kg, weight_n=weight_n, thrust_n=thrust_n, drag_cd=vehicle.drag_cd,
+            base_area_m2=base_area, lift_fn=lift_fn, parasite_area_m2=parasite_area,
+            inertia_kg_m2=inertia_kg_m2, max_torque_n_m=max_torque_n_m,
+            kp=vehicle.attitude_kp, kd=vehicle.attitude_kd,
+            v0=v_cruise, v_floor=1.0, distance_cap=distance_m / 2)
+        if decel is None:
+            return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+        t_dec, x_dec, _v_end = decel
+    else:
+        # Wingless multirotor: unchanged closed-form path.
+        thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - weight_n * weight_n, 0.0))
+        if thrust_horizontal_n <= 0:
+            return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+        effective_area = base_area * (thrust_n / thrust_horizontal_n)
+        kk = 0.5 * RHO_AIR * vehicle.drag_cd * effective_area / mass_kg
+        a0 = thrust_horizontal_n / mass_kg
+        accel = _accel_phase_closed_form(a0, kk, v0=1.0, v_target=v_target, distance_cap=distance_m / 2)
+        if accel is None:
+            return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+        t_acc, x_acc, v_cruise = accel
+
+        decel_area = _effective_area_at(thrust_n, weight_n, base_area, lift_fn, v_cruise, parasite_area)
+        kk_decel = 0.5 * RHO_AIR * vehicle.drag_cd * decel_area / mass_kg
+        effective_weight_cruise_n = max(weight_n - lift_fn(v_cruise), 0.0)
+        thrust_horizontal_decel_n = math.sqrt(
+            max(thrust_n * thrust_n - effective_weight_cruise_n * effective_weight_cruise_n, 0.0))
+        a0_decel = thrust_horizontal_decel_n / mass_kg
+        t_dec, x_dec, _v_end = _decel_phase_powered(a0_decel, kk_decel, v_cruise, v_floor=1.0,
+                                                      distance_cap=distance_m / 2)
 
     # Energy uses the cruise-throttle current for both phases, matching the
     # original's assumption that throttle (and so current draw) is held
