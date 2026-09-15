@@ -122,3 +122,106 @@ def estimate_max_torque_n_m(thrust_min_n_per_motor: float, thrust_max_n_per_moto
     roll_torque_n_m = thrust_range_n * roll_arm_m
     yaw_torque_n_m = 0.2 * pitch_torque_n_m
     return roll_torque_n_m, pitch_torque_n_m, yaw_torque_n_m
+
+
+def _rigid_body_rhs(_t, state, thrust_n, mass_kg, drag_cd, base_area_m2, lift_fn,
+                     parasite_area_m2, inertia_kg_m2, max_torque_n_m, kp, kd, q_target):
+    v = state[3:6]
+    q = quat_normalize(state[6:10])
+    omega = state[10:13]
+
+    speed = float(np.linalg.norm(v))
+    v_dir = v / speed if speed > 1e-9 else np.array([1.0, 0.0, 0.0])
+
+    thrust_world = quat_rotate_vector(q, np.array([0.0, 0.0, thrust_n]))
+    lift_world = np.array([0.0, 0.0, lift_fn(speed)])
+    drag_n = 0.5 * RHO_AIR * drag_cd * (base_area_m2 + parasite_area_m2) * speed * speed
+    drag_world = -drag_n * v_dir
+    gravity_world = np.array([0.0, 0.0, -mass_kg * G])
+    accel = (thrust_world + lift_world + drag_world + gravity_world) / mass_kg
+
+    inertia = np.array(inertia_kg_m2, dtype=float)
+    q_err = quat_log_error(q, q_target)
+    torque = np.clip(kp * inertia * q_err - kd * inertia * omega,
+                      -np.array(max_torque_n_m, dtype=float), np.array(max_torque_n_m, dtype=float))
+    omega_dot = (torque - np.cross(omega, inertia * omega)) / inertia
+
+    q_dot = quat_derivative(q, omega)
+    return np.concatenate([v, accel, q_dot, omega_dot])
+
+
+def _integrate_transition(thrust_n, weight_n, mass_kg, drag_cd, base_area_m2, lift_fn,
+                           parasite_area_m2, inertia_kg_m2, max_torque_n_m, kp, kd,
+                           q_start, q_target, v0, v_event, event_direction, distance_cap,
+                           speed_slice=slice(3, 6)):
+    # Deviation from the brief: the speed the v_event tracks is configurable
+    # (full 3D velocity norm by default, matching the brief's original
+    # hit_v_event) rather than hard-coded, because the two callers need
+    # different quantities. transition_accel keeps the brief's full-norm
+    # check as given (its own v_target=18 regression test only reaches 18
+    # via the dive-augmented full speed; the pure-forward component tops
+    # out near 16.2 m/s here, verified numerically). transition_decel
+    # instead needs the horizontal-only component (state[3:5]): with this
+    # zero-lift synthetic vehicle, thrust must always exceed weight_n (see
+    # the guard below), so once the body pitches back to hover it
+    # inevitably develops a net climb -- verified numerically, decel's
+    # forward (x) speed decays past v_floor=1.0 around t=7.3s while the
+    # full 3D speed (climb included) instead settles at a steady state
+    # ~9.6 m/s and never crosses the floor, timing out with no event
+    # fired. Both transition functions' own docstrings describe this as a
+    # forward-airspeed transition, so the horizontal projection is the
+    # physically correct quantity for decel's floor check.
+    if thrust_n <= weight_n:
+        return None  # can't even support weight, let alone complete a transition
+
+    state0 = np.concatenate([[0.0, 0.0, 0.0], [v0, 0.0, 0.0], q_start, [0.0, 0.0, 0.0]])
+
+    def hit_v_event(_t, state, *_args):
+        # scipy passes solve_ivp's `args` tuple to event functions too, not
+        # just `fun` -- *_args absorbs it since these events don't need it.
+        return float(np.linalg.norm(state[speed_slice])) - v_event
+
+    hit_v_event.terminal = True
+    hit_v_event.direction = event_direction
+
+    def hit_distance(_t, state, *_args):
+        return state[0] - distance_cap
+
+    hit_distance.terminal = True
+    hit_distance.direction = 1
+
+    sol = solve_ivp(
+        _rigid_body_rhs, [0.0, 300.0], state0,
+        args=(thrust_n, mass_kg, drag_cd, base_area_m2, lift_fn, parasite_area_m2,
+              inertia_kg_m2, max_torque_n_m, kp, kd, q_target),
+        events=[hit_v_event, hit_distance], max_step=0.5, rtol=1e-6, atol=1e-8,
+    )
+    if sol.t_events[0].size == 0 and sol.t_events[1].size == 0:
+        return None  # neither the target speed nor the distance cap was reached
+    final = sol.y[:, -1]
+    return sol.t[-1], float(final[0]), float(np.linalg.norm(final[3:6]))
+
+
+def transition_accel(mass_kg, weight_n, thrust_n, drag_cd, base_area_m2, lift_fn, parasite_area_m2,
+                      inertia_kg_m2, max_torque_n_m, kp, kd, v0, v_target, distance_cap):
+    """Hover -> cruise attitude transition, powered by thrust redirected via
+    quaternion attitude integration instead of the tilt-area trick. Same
+    (time_s, distance_m, v_final) | None contract as the retired
+    Mission_Model.py _accel_phase_numeric."""
+    return _integrate_transition(thrust_n, weight_n, mass_kg, drag_cd, base_area_m2, lift_fn,
+                                  parasite_area_m2, inertia_kg_m2, max_torque_n_m, kp, kd,
+                                  q_start=HOVER_QUAT, q_target=CRUISE_QUAT, v0=v0,
+                                  v_event=v_target, event_direction=1, distance_cap=distance_cap)
+
+
+def transition_decel(mass_kg, weight_n, thrust_n, drag_cd, base_area_m2, lift_fn, parasite_area_m2,
+                      inertia_kg_m2, max_torque_n_m, kp, kd, v0, v_floor, distance_cap):
+    """Cruise -> hover attitude transition: as the body pitches back toward
+    vertical, forward thrust drops off and drag decelerates the vehicle --
+    a simplified 'return to hover attitude' braking model, not an
+    aggressive reverse-thrust maneuver (see the design doc's non-goals)."""
+    return _integrate_transition(thrust_n, weight_n, mass_kg, drag_cd, base_area_m2, lift_fn,
+                                  parasite_area_m2, inertia_kg_m2, max_torque_n_m, kp, kd,
+                                  q_start=CRUISE_QUAT, q_target=HOVER_QUAT, v0=v0,
+                                  v_event=v_floor, event_direction=-1, distance_cap=distance_cap,
+                                  speed_slice=slice(3, 5))

@@ -9,6 +9,7 @@ from dynamics_6dof import (
     quat_derivative, quat_from_axis_angle, quat_log, quat_log_error,
     HOVER_QUAT, CRUISE_QUAT, G as DYN_G, RHO_AIR as DYN_RHO_AIR,
     estimate_inertia_kg_m2, estimate_max_torque_n_m,
+    transition_accel, transition_decel,
 )
 from Mission_Model import G, RHO_AIR
 
@@ -143,6 +144,60 @@ def test_estimate_inertia_succeeds_with_asymmetric_zero():
     assert math.isclose(ixx, 0.0)  # roll: wing zero
     assert math.isclose(iyy, expected_i_fuselage)  # pitch: fuselage only
     assert math.isclose(izz, expected_i_fuselage)  # yaw: fuselage only
+
+
+def _synthetic_params():
+    return dict(
+        mass_kg=5.0, weight_n=5.0 * DYN_G, thrust_n=5.0 * DYN_G * 1.4, drag_cd=1.0,
+        base_area_m2=0.3, lift_fn=lambda v: 0.0, parasite_area_m2=0.05,
+        inertia_kg_m2=(0.3, 0.5, 0.6), max_torque_n_m=(2.0, 3.0, 1.0),
+        kp=4.0, kd=2.0,
+    )
+
+
+def test_transition_accel_reaches_target_speed():
+    p = _synthetic_params()
+    result = transition_accel(v0=1.0, v_target=15.0, distance_cap=2000.0, **p)
+    assert result is not None
+    t, x, v = result
+    assert t > 0.0 and x > 0.0
+    assert not math.isnan(t) and not math.isnan(x) and not math.isnan(v)
+
+
+def test_transition_accel_returns_none_when_thrust_cant_support_weight():
+    p = _synthetic_params()
+    p["thrust_n"] = p["weight_n"] * 0.9
+    result = transition_accel(v0=1.0, v_target=15.0, distance_cap=2000.0, **p)
+    assert result is None
+
+
+def test_transition_accel_returns_none_when_torque_authority_is_negligible():
+    """With no pitch authority, thrust stays vertical the whole flight, so
+    forward speed only ever decays under drag from its 1 m/s start -- it
+    never reaches v_target and (being bounded, not runaway) never reaches
+    distance_cap either, so solve_ivp times out with no event fired."""
+    p = _synthetic_params()
+    p["max_torque_n_m"] = (1e-6, 1e-6, 1e-6)
+    result = transition_accel(v0=1.0, v_target=15.0, distance_cap=2000.0, **p)
+    assert result is None
+
+
+def test_transition_decel_reaches_floor_speed():
+    p = _synthetic_params()
+    result = transition_decel(v0=15.0, v_floor=1.0, distance_cap=2000.0, **p)
+    assert result is not None
+    t, x, v = result
+    assert t > 0.0
+    assert not math.isnan(v)
+
+
+def test_transition_accel_pitches_through_90_degrees_without_nan():
+    """The specific failure mode quaternions (vs. Euler angles) avoid --
+    confirm the full hover-to-cruise 90 degree pitch integrates cleanly."""
+    p = _synthetic_params()
+    result = transition_accel(v0=1.0, v_target=18.0, distance_cap=5000.0, **p)
+    assert result is not None
+    assert all(not math.isnan(x) for x in result)
 
 
 if __name__ == "__main__":
