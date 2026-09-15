@@ -105,6 +105,46 @@ def test_estimate_max_torque_rejects_zero_geometry():
         pass
 
 
+def test_estimate_max_torque_fallback_pitch_arm_when_body_length_zero():
+    # body_length_m=0, wing_span_m>0: pitch_arm should fall back to wing_span_m/2
+    roll, pitch, yaw = estimate_max_torque_n_m(thrust_min_n_per_motor=10.0, thrust_max_n_per_motor=30.0,
+                                                body_length_m=0.0, wing_span_m=2.0)
+    thrust_range_n = 20.0
+    expected_pitch = thrust_range_n * (2.0 / 2.0)  # fallback arm
+    expected_roll = thrust_range_n * (2.0 / 2.0)  # normal arm
+    assert math.isclose(pitch, expected_pitch)
+    assert math.isclose(roll, expected_roll)
+    assert math.isclose(yaw, 0.2 * pitch)
+
+
+def test_estimate_max_torque_fallback_roll_arm_when_wing_span_zero():
+    # wing_span_m=0, body_length_m>0: roll_arm should fall back to body_length_m/2
+    roll, pitch, yaw = estimate_max_torque_n_m(thrust_min_n_per_motor=10.0, thrust_max_n_per_motor=30.0,
+                                                body_length_m=1.0, wing_span_m=0.0)
+    thrust_range_n = 20.0
+    expected_pitch = thrust_range_n * (1.0 / 2.0)  # normal arm
+    expected_roll = thrust_range_n * (1.0 / 2.0)  # fallback arm
+    assert math.isclose(pitch, expected_pitch)
+    assert math.isclose(roll, expected_roll)
+    assert math.isclose(yaw, 0.2 * pitch)
+
+
+def test_estimate_inertia_succeeds_with_asymmetric_zero():
+    # body_length_m=0, wing_span_m>0: should not raise, i_fuselage=0, ixx and izz from wing only
+    ixx, iyy, izz = estimate_inertia_kg_m2(mass_kg=2.0, body_length_m=0.0, wing_span_m=2.0)
+    expected_i_wing = (1.0 * 2.0 ** 2) / 12.0
+    assert math.isclose(ixx, expected_i_wing)  # roll: wing only
+    assert math.isclose(iyy, 0.0)  # pitch: fuselage zero
+    assert math.isclose(izz, expected_i_wing)  # yaw: wing only
+
+    # wing_span_m=0, body_length_m>0: should not raise, i_wing=0, iyy and izz from fuselage only
+    ixx, iyy, izz = estimate_inertia_kg_m2(mass_kg=2.0, body_length_m=1.0, wing_span_m=0.0)
+    expected_i_fuselage = (1.0 * 1.0 ** 2) / 12.0
+    assert math.isclose(ixx, 0.0)  # roll: wing zero
+    assert math.isclose(iyy, expected_i_fuselage)  # pitch: fuselage only
+    assert math.isclose(izz, expected_i_fuselage)  # yaw: fuselage only
+
+
 if __name__ == "__main__":
     tests = [v for k, v in list(globals().items()) if k.startswith("test_")]
     for t in tests:
