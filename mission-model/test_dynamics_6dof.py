@@ -9,7 +9,7 @@ from dynamics_6dof import (
     quat_derivative, quat_from_axis_angle, quat_log, quat_log_error,
     HOVER_QUAT, CRUISE_QUAT, G as DYN_G, RHO_AIR as DYN_RHO_AIR,
     estimate_inertia_kg_m2, estimate_max_torque_n_m,
-    transition_accel, transition_decel,
+    transition_accel, transition_decel, _integrate_transition,
 )
 from Mission_Model import G, RHO_AIR
 
@@ -191,13 +191,50 @@ def test_transition_decel_reaches_floor_speed():
     assert not math.isnan(v)
 
 
+def test_transition_decel_returns_none_when_thrust_cant_support_weight():
+    """Mirror of the accel guard: the same thrust > weight precheck gates
+    both transitions, so neither can report a completed maneuver for a
+    vehicle that cannot even hold itself up."""
+    p = _synthetic_params()
+    p["thrust_n"] = p["weight_n"] * 0.9
+    result = transition_decel(v0=15.0, v_floor=1.0, distance_cap=2000.0, **p)
+    assert result is None
+
+
 def test_transition_accel_pitches_through_90_degrees_without_nan():
     """The specific failure mode quaternions (vs. Euler angles) avoid --
-    confirm the full hover-to-cruise 90 degree pitch integrates cleanly."""
+    confirm the full hover-to-cruise 90 degree pitch integrates cleanly.
+
+    v_target is 16.0, not 18.0: this synthetic vehicle's *forward* speed
+    tops out at 16.17 m/s (verified numerically). It used to be given 18.0,
+    which only ever fired because the speed event then measured the full 3D
+    velocity norm and counted the accompanying dive -- see the
+    forward-speed note in _integrate_transition."""
     p = _synthetic_params()
-    result = transition_accel(v0=1.0, v_target=18.0, distance_cap=5000.0, **p)
+    result = transition_accel(v0=1.0, v_target=16.0, distance_cap=5000.0, **p)
     assert result is not None
     assert all(not math.isnan(x) for x in result)
+
+
+def test_transition_accel_actually_pitches_toward_cruise_attitude():
+    """Reaching v_target must be the result of a real hover->cruise
+    pitch-over, not of diving or being blown along by wing force. Nothing
+    else asserts the attitude actually moved, so check it directly via
+    _integrate_transition's test-only final-state hook (transition_accel's
+    public 3-tuple is what segment() consumes and stays unchanged)."""
+    p = _synthetic_params()
+    result = _integrate_transition(
+        p["thrust_n"], p["weight_n"], p["mass_kg"], p["drag_cd"], p["base_area_m2"],
+        p["lift_fn"], p["parasite_area_m2"], p["inertia_kg_m2"], p["max_torque_n_m"],
+        p["kp"], p["kd"], q_start=HOVER_QUAT, q_target=CRUISE_QUAT, v0=1.0,
+        v_event=15.0, event_direction=1, distance_cap=2000.0, return_final_state=True)
+    assert result is not None
+    _t, _x, _v, final_state = result
+    q_final = quat_normalize(final_state[6:10])
+    pitched_deg = math.degrees(float(np.linalg.norm(quat_log_error(HOVER_QUAT, q_final))))
+    # The full hover->cruise pitch is 90 deg; require most of it (measured
+    # 100.3 deg here -- the attitude controller overshoots slightly).
+    assert pitched_deg >= 60.0, f"only pitched {pitched_deg:.1f} deg away from hover"
 
 
 if __name__ == "__main__":

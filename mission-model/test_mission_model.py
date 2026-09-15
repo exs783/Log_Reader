@@ -539,32 +539,49 @@ def test_segment_winged_vehicle_infeasible_with_negligible_torque_authority():
     never pitch over into cruise attitude -- segment() should report the
     leg as infeasible, not raise or hang.
 
-    Deviation from the plan brief's literal parameters (wing_cl=0.9,
-    throttle_pct=80.0, default inertia): verified numerically that with
-    those values this vehicle still reaches v_target and is reported
-    feasible despite having essentially zero torque authority. Cause,
-    confirmed by tracing dynamics_6dof._integrate_transition: with the
-    attitude frozen near hover, transition_accel's speed event fires on
-    the full 3D velocity norm (by design -- see that module's own
-    comments), and a high wing_cl lets lift grow with climb speed and
-    bootstrap a vertical climb past v_target even though the vehicle never
-    pitches toward cruise attitude at all -- a "success" that isn't a real
-    transition. dynamics_6dof.py is out of scope for this task and was
-    independently verified correct in Tasks 1-3, so the fix here is in the
-    test's own vehicle parameters, not the dynamics: a near-zero wing_cl
-    removes the lift-climb feedback, and a deliberately huge
-    inertia_kg_m2 makes the near-zero torque negligible *relative to
-    inertia* too (angular accel = torque/inertia), matching what "can
-    never pitch over" actually requires. Checked numerically across
-    throttle_pct 40-55 with these parameters -- robustly infeasible
-    throughout, not a knife-edge single point."""
+    Back on the plan's original parameters (wing_cl=0.9, throttle_pct=80.0,
+    no inertia override). Task 4 had to weaken them (wing_cl=0.05,
+    throttle 50, inertia 1e6) because two attitude-blind bugs in
+    dynamics_6dof let a vehicle that never pitches still "reach v_target":
+    world-vertical lift that grew with climb speed, and a speed event
+    measured as a magnitude, which reads a vehicle blown backwards as
+    fast. Both are fixed, so the honest parameters work again -- verified
+    numerically as infeasible across the whole throttle range 40-100, not
+    a knife-edge point."""
     cfg = make_cfg(thrust_at_100=4000.0, current_at_100=30.0)
-    vehicle = dataclasses.replace(mm.MULTIROTOR, wing_area_m2=1.0, wing_cl=0.05, max_speed_mps=20.0,
-                                   max_control_torque_n_m=(1e-6, 1e-6, 1e-6),
-                                   inertia_kg_m2=(1e6, 1e6, 1e6))
-    t, e = mm.segment(vehicle, cfg, BATTERY, throttle_pct=50.0, distance_m=2000.0)
+    vehicle = dataclasses.replace(mm.MULTIROTOR, wing_area_m2=1.0, wing_cl=0.9, max_speed_mps=20.0,
+                                   max_control_torque_n_m=(1e-6, 1e-6, 1e-6))
+    t, e = mm.segment(vehicle, cfg, BATTERY, throttle_pct=80.0, distance_m=2000.0)
     assert t == mm.INFEASIBLE_TIME_S
     assert e == mm.INFEASIBLE_ENERGY_MAH
+
+
+def test_segment_real_tailsitter_config_is_feasible():
+    """Whole-branch regression guard: every other winged test here uses a
+    fabricated vehicle, and none of them caught the lift bug that made
+    segment() report every real tailsitter INFEASIBLE. This one flies a
+    catalogue vehicle on a catalogue motor.
+
+    Two real operating points: unloaded at 70% (the reviewer's repro), and
+    the loaded mission condition (220 lb payload) at 80%. Both used to be
+    INFEASIBLE. The t bound is a generous sanity check, not a pin -- the
+    pre-regression closed-form model gave 111.6 s for the unloaded case."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    vehicles = {v.name: v for v in mm.load_vehicle_types(os.path.join(here, "vechicle_configs", "TailSitter.json"))}
+    cfgs = {c.motor_model: c for c in
+            mm.load_motor_configs(os.path.join(here, "Motors", "TMOTOR_U15XXL_KV29.json"))}
+    vehicle = vehicles["TailSitter_Contra_Compact"]
+    cfg = cfgs["TMOTOR_U15XXL_KV29"]
+    assert cfg.cells_s == 24  # battery below must match: a motor curve is only valid at its measured voltage
+    battery = mm.Battery(name="test-24S", mass_g=9345.0, capacity_mah=30000.0, cost_usd=2651.0, cells_s=24)
+
+    for throttle_pct, payload_g in ((70.0, 0.0), (80.0, 220.0 * mm.LB_TO_G)):
+        t, e = mm.segment(vehicle, cfg, battery, throttle_pct=throttle_pct, distance_m=2000.0,
+                          extra_payload_g=payload_g)
+        assert t < mm.INFEASIBLE_TIME_S, f"throttle {throttle_pct}, payload {payload_g:.0f}g: infeasible time"
+        assert e < mm.INFEASIBLE_ENERGY_MAH, f"throttle {throttle_pct}, payload {payload_g:.0f}g: infeasible energy"
+        assert 0.0 < t < 300.0, f"throttle {throttle_pct}, payload {payload_g:.0f}g: implausible t={t}"
+        assert e > 0.0
 
 
 def test_vehicle_type_fields_load_and_ignore_still_work():

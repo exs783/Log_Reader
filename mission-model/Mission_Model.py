@@ -37,10 +37,10 @@ Changes vs. the MATLAB original (see inline notes at each site):
   - Wing lift (0.5*rho*CL*S*v^2) is subtracted from the weight the rotors
     must support during cruise. For a wingless vehicle this is always zero
     and the fast closed-form path above still applies. For a winged one,
-    thrust_horizontal grows (and required tilt shrinks) as airspeed builds,
-    which makes the accel-phase ODE velocity-coupled and no longer
-    closed-form -- that one phase, for winged vehicles only, is solved
-    numerically (scipy.solve_ivp) instead.
+    lift and thrust direction both depend on attitude, which makes the
+    transition phases velocity- and attitude-coupled and no longer
+    closed-form -- those phases, for winged vehicles only, are integrated
+    as a quaternion 6DOF rigid body in dynamics_6dof.py instead.
   - The MATLAB course (timed laps, maximize lap count, patternsearch
     MultiStart) is replaced by a fixed one-pass course: takeoff/100ft,
     cruise 1nm, land, pick up cargo, takeoff, cruise 8nm, land, drop cargo,
@@ -102,7 +102,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from scipy.integrate import solve_ivp
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import brentq
 
