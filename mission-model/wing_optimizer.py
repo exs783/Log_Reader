@@ -36,6 +36,15 @@ Two objectives (--objective):
   planform only, no --naca/--airfoil-dat wired into the search itself --
   both still work fine against the winning geometry afterward).
 
+Every objective also reports mean aerodynamic chord (MAC) and where the wing's
+own aerodynamic center sits relative to its root leading edge (wing_mac_and_ac())
+-- a wing-only precursor to a real static-margin check, which also needs the
+aircraft's CG and any tail (out of scope here). --mass-model beam swaps the
+default AR-only mass heuristic for a beam-bending-derived one that also depends
+on --load-factor and --airfoil-thickness-ratio (see wing_mass_g_beam()).
+--objective combined additionally accepts --taper-min/--taper-max to search
+taper jointly with cl/AR instead of fixing it (see optimize_wing_combined()).
+
 Pass --naca (a 4-digit code, e.g. 2412) to also print SolidWorks Equation
 Driven Curve equations for that airfoil at the optimized chord -- paste-ready
 global variables plus parametric x(t)/y(t) for the upper and lower surfaces.
@@ -59,6 +68,14 @@ RHO_AIR = 1.225  # kg/m^3
 MAX_WING_LOADING_KG_M2 = 97.65
 
 AR_REF = 8.0  # aspect ratio the areal-density input is quoted at
+
+# Reference point for the "beam" mass model (see wing_mass_g_beam()): a typical
+# small-UAV/utility-category limit load factor and a typical airfoil thickness
+# ratio (matches the 2412/4412-class sections this file's own --naca examples
+# use) -- not measured, same "documented estimate" spirit as parasite_cd0.
+LOAD_FACTOR_REF = 3.0
+T_C_REF = 0.12
+BEAM_AR_EXPONENT = 1.5
 
 UNIT_TO_MM = {"mm": 1.0, "m": 1000.0, "in": 25.4}
 
@@ -299,6 +316,83 @@ def wing_mass_g(area_m2: float, aspect_ratio: float, areal_density_g_m2: float, 
     return areal_density_g_m2 * area_m2 * (aspect_ratio / AR_REF) ** ar_mass_exponent * bending_relief_factor
 
 
+def wing_mass_g_beam(area_m2: float, aspect_ratio: float, areal_density_g_m2: float,
+                      bending_relief_factor: float, load_factor: float, thickness_ratio: float) -> float:
+    """Alternative to wing_mass_g()'s AR^ar_mass_exponent heuristic: a beam-
+    bending-derived scaling that makes two real structural drivers (ultimate
+    load factor, airfoil thickness ratio) visible to the optimizer instead of
+    folding everything into one fitted AR exponent -- the gap this file's
+    original heuristic left that a rigorous structural model (real FE/vibration-
+    test-based mass-and-stiffness identification, well beyond a standalone
+    script's scope) would otherwise close.
+
+    Derivation: for a wing of fixed area, span grows as sqrt(AR) while chord
+    (and so structural depth, ~thickness_ratio * chord) shrinks as 1/sqrt(AR);
+    root bending moment scales with span, and the material needed to react a
+    given moment at a given depth scales inversely with that depth -- combining
+    those gives a steeper-than-sqrt AR penalty (AR^1.5, BEAM_AR_EXPONENT) than
+    wing_mass_g()'s fitted AR^0.5 default. Load factor enters linearly (mass
+    ~ moment ~ load); thickness ratio enters as an inverse square root (a
+    thinner section needs proportionally more material at the same depth to
+    react the same moment). This is a first-order physical scaling, not a
+    specific named empirical curve fit -- normalized so it reproduces
+    wing_mass_g()'s reference point at aspect_ratio=AR_REF, load_factor=
+    LOAD_FACTOR_REF, thickness_ratio=T_C_REF.
+    """
+    return (
+        areal_density_g_m2 * area_m2 * bending_relief_factor
+        * (aspect_ratio / AR_REF) ** BEAM_AR_EXPONENT
+        * (load_factor / LOAD_FACTOR_REF)
+        * (T_C_REF / thickness_ratio) ** 0.5
+    )
+
+
+def compute_wing_mass_g(mass_model: str, area_m2: float, aspect_ratio: float, areal_density_g_m2: float,
+                         ar_mass_exponent: float, bending_relief_factor: float, load_factor: float,
+                         thickness_ratio: float) -> float:
+    """Dispatch to wing_mass_g() ('empirical', today's AR^exponent heuristic --
+    the default, unchanged) or wing_mass_g_beam() ('beam', see above) -- the
+    single place every objective computes wing mass, so --mass-model applies
+    identically no matter which objective is run."""
+    if mass_model == "empirical":
+        return wing_mass_g(area_m2, aspect_ratio, areal_density_g_m2, ar_mass_exponent, bending_relief_factor)
+    if mass_model == "beam":
+        return wing_mass_g_beam(area_m2, aspect_ratio, areal_density_g_m2, bending_relief_factor, load_factor, thickness_ratio)
+    raise ValueError(f"mass_model must be 'empirical' or 'beam', got {mass_model!r}")
+
+
+def wing_mac_and_ac(root_chord_m: float, taper_ratio: float, span_m: float, planform: str,
+                     sweep_deg: float) -> dict:
+    """Mean aerodynamic chord (MAC) and its spanwise/longitudinal location,
+    from standard closed-form wing-theory integrals -- MAC = integral(c(y)^2 dy)
+    / integral(c(y) dy) over the semi-span, y_mac = integral(y*c(y) dy) /
+    integral(c(y) dy). For a linear taper this is the standard textbook result
+    MAC = (2/3)*c_root*(1+t+t^2)/(1+t), y_mac = (b/6)*(1+2t)/(1+t) (t=taper_ratio,
+    b=span_m; reduces to MAC=c_root, y_mac=b/4 at t=1, the rectangular case).
+    For an elliptical planform (chord(y) = c_root*sqrt(1-(y/s)^2), s=semi-span)
+    the same integrals give MAC = (8/(3*pi))*c_root, y_mac = (4*s)/(3*pi) --
+    derived directly here, not quoted from a table.
+
+    x_ac_from_root_le_m assumes the local aerodynamic center sits at the
+    quarter-chord of the MAC station (the standard thin-airfoil-theory
+    estimate) and uses this file's existing LE-sweep convention (same
+    half_span*tan(sweep_deg) used in wing_stations()) to place it aft of the
+    root leading edge: x_ac = y_mac*tan(sweep_deg) + 0.25*MAC. This reports
+    where the wing's own aerodynamic center is -- NOT a full static-margin
+    check, which also needs the aircraft's CG and tail contribution (out of
+    scope for a wing-only script).
+    """
+    if planform == "elliptical":
+        mac_m = (8.0 / (3.0 * math.pi)) * root_chord_m
+        y_mac_m = (4.0 / (3.0 * math.pi)) * (span_m / 2.0)
+    else:
+        t = taper_ratio
+        mac_m = (2.0 / 3.0) * root_chord_m * (1 + t + t * t) / (1 + t)
+        y_mac_m = (span_m / 6.0) * (1 + 2 * t) / (1 + t)
+    x_ac_from_root_le_m = y_mac_m * math.tan(math.radians(sweep_deg)) + 0.25 * mac_m
+    return {"mac_m": mac_m, "y_mac_m": y_mac_m, "x_ac_from_root_le_m": x_ac_from_root_le_m}
+
+
 def bending_relief_factor(planform: str, taper_ratio: float) -> float:
     """How much lighter a tapered/elliptical wing's structure can be than a
     rectangular one of the same area/AR, from the root bending moment a
@@ -329,7 +423,9 @@ def elliptical_chord_m(y_frac: float, root_chord_m: float) -> float:
 
 def optimize_wing(lift_mass_kg: float, cruise_mps: float, cl: float, min_ar: float, max_ar: float,
                    max_span_m: float | None, areal_density_g_m2: float, ar_mass_exponent: float,
-                   steps: int = 200, taper_ratio: float = 1.0, planform: str = "linear") -> dict:
+                   steps: int = 200, taper_ratio: float = 1.0, planform: str = "linear",
+                   mass_model: str = "empirical", load_factor: float = LOAD_FACTOR_REF,
+                   thickness_ratio: float = T_C_REF) -> dict:
     if taper_ratio <= 0.0:
         raise ValueError(f"taper_ratio must be > 0 (tip_chord/root_chord), got {taper_ratio}")
     if planform == "elliptical" and taper_ratio != 1.0:
@@ -346,7 +442,8 @@ def optimize_wing(lift_mass_kg: float, cruise_mps: float, cl: float, min_ar: flo
         span_m = math.sqrt(ar * area_m2)
         if max_span_m is not None and span_m > max_span_m:
             continue
-        mass_g = wing_mass_g(area_m2, ar, areal_density_g_m2, ar_mass_exponent, bending_relief_factor=relief)
+        mass_g = compute_wing_mass_g(mass_model, area_m2, ar, areal_density_g_m2, ar_mass_exponent,
+                                      relief, load_factor, thickness_ratio)
         if best is None or mass_g < best["wing_mass_g"]:
             best = {"aspect_ratio": ar, "span_m": span_m, "wing_mass_g": mass_g}
 
@@ -459,7 +556,9 @@ def optimize_wing_drag(lift_mass_kg: float, cruise_mps: float, cl_min: float, cl
 def optimize_wing_combined(lift_mass_kg: float, cruise_mps: float, cl_min: float, cl_max: float,
                             min_ar: float, max_ar: float, max_span_m: float | None,
                             parasite_cd0: float, hover_s: float, cruise_s: float, disk_loading_kg_m2: float,
-                            areal_density_g_m2: float, ar_mass_exponent: float, taper_ratio: float = 1.0,
+                            areal_density_g_m2: float, ar_mass_exponent: float, taper_min: float = 1.0,
+                            taper_max: float = 1.0, taper_steps: int = 20, mass_model: str = "empirical",
+                            load_factor: float = LOAD_FACTOR_REF, thickness_ratio: float = T_C_REF,
                             sweep_deg: float = 0.0, cl_steps: int = 100, ar_steps: int = 100) -> dict:
     """Grid-search (cl, aspect_ratio) jointly to minimize total mission
     energy -- the tradeoff-aware "best wing" objective, vs. optimize_wing()'s
@@ -484,9 +583,20 @@ def optimize_wing_combined(lift_mass_kg: float, cruise_mps: float, cl_min: float
     No induced/profile-power losses, motor/prop efficiency, or non-hover
     transition phases are modeled -- same "labeled physical estimate, not a
     real mission sim" spirit as the rest of this file (see parasite_cd0's
-    default). taper_ratio isn't searched (same as optimize_wing_drag()) --
-    it's a fixed input applied to the winning candidate's mass and root/tip
-    chords after the fact.
+    default).
+
+    taper_min/taper_max (equal by default -- a fixed taper_ratio, same as
+    before) are now searched jointly with cl and aspect ratio when they
+    differ, instead of taper being fixed and applied to the winning (cl, AR)
+    after the fact. This is a real coupling, not a cosmetic one: taper only
+    ever enters this model through bending_relief_factor() -> wing_mass_g,
+    which feeds hover_energy_j (a lighter wing at the same cl/AR costs less
+    to hover) -- so a taper that would have been "decided" independently of
+    cl/AR by a decoupled search can now trade off against them for lower
+    total_energy_j. Induced drag itself doesn't depend on taper in this model
+    (oswald_efficiency() is AR-and-sweep-only by design, per Raymer -- see its
+    docstring), so taper's effect here runs entirely through the mass/hover
+    channel, not the cruise-drag term.
     """
     if cl_min <= 0.0 or cl_max <= cl_min:
         raise ValueError(f"need 0 < cl_min < cl_max, got cl_min={cl_min}, cl_max={cl_max}")
@@ -494,9 +604,12 @@ def optimize_wing_combined(lift_mass_kg: float, cruise_mps: float, cl_min: float
         raise ValueError(f"--disk-loading-kg-m2 must be > 0, got {disk_loading_kg_m2}")
     if hover_s < 0.0 or cruise_s < 0.0:
         raise ValueError(f"--hover-s/--cruise-s must be >= 0, got hover_s={hover_s}, cruise_s={cruise_s}")
+    if taper_min <= 0.0 or taper_max < taper_min:
+        raise ValueError(f"need 0 < taper_min <= taper_max, got taper_min={taper_min}, taper_max={taper_max}")
 
-    relief = bending_relief_factor("linear", taper_ratio)
     disk_area_m2 = lift_mass_kg / disk_loading_kg_m2
+    taper_values = ([taper_min] if taper_max == taper_min else
+                     [taper_min + (taper_max - taper_min) * ti / taper_steps for ti in range(taper_steps + 1)])
 
     best = None
     for ci in range(cl_steps + 1):
@@ -506,19 +619,27 @@ def optimize_wing_combined(lift_mass_kg: float, cruise_mps: float, cl_min: float
             candidate = _cl_ar_candidate(lift_mass_kg, cruise_mps, cl, ar, parasite_cd0, sweep_deg)
             if max_span_m is not None and candidate["span_m"] > max_span_m:
                 continue
-            wing_mass_g_val = wing_mass_g(candidate["wing_area_m2"], ar, areal_density_g_m2,
-                                           ar_mass_exponent, bending_relief_factor=relief)
-            total_weight_n = (lift_mass_kg + wing_mass_g_val / 1000.0) * G
-            hover_power_w = total_weight_n**1.5 / math.sqrt(2 * RHO_AIR * disk_area_m2)
+            # Taper doesn't affect area/span/drag (see docstring), so those are
+            # computed once per (cl, ar) above and only the mass/hover terms
+            # are recomputed per taper candidate below.
             cruise_energy_j = candidate["drag_n"] * cruise_mps * cruise_s
-            hover_energy_j = hover_power_w * hover_s
-            candidate["wing_mass_g"] = wing_mass_g_val
-            candidate["hover_power_w"] = hover_power_w
-            candidate["cruise_energy_j"] = cruise_energy_j
-            candidate["hover_energy_j"] = hover_energy_j
-            candidate["total_energy_j"] = cruise_energy_j + hover_energy_j
-            if best is None or candidate["total_energy_j"] < best["total_energy_j"]:
-                best = candidate
+            for taper_ratio in taper_values:
+                relief = bending_relief_factor("linear", taper_ratio)
+                wing_mass_g_val = compute_wing_mass_g(mass_model, candidate["wing_area_m2"], ar, areal_density_g_m2,
+                                                        ar_mass_exponent, relief, load_factor, thickness_ratio)
+                total_weight_n = (lift_mass_kg + wing_mass_g_val / 1000.0) * G
+                hover_power_w = total_weight_n**1.5 / math.sqrt(2 * RHO_AIR * disk_area_m2)
+                hover_energy_j = hover_power_w * hover_s
+                total_energy_j = cruise_energy_j + hover_energy_j
+                if best is None or total_energy_j < best["total_energy_j"]:
+                    best = dict(candidate)
+                    best["wing_mass_g"] = wing_mass_g_val
+                    best["hover_power_w"] = hover_power_w
+                    best["cruise_energy_j"] = cruise_energy_j
+                    best["hover_energy_j"] = hover_energy_j
+                    best["total_energy_j"] = total_energy_j
+                    best["taper_ratio"] = taper_ratio
+                    best["bending_relief_factor"] = relief
 
     if best is None:
         raise ValueError(
@@ -532,10 +653,8 @@ def optimize_wing_combined(lift_mass_kg: float, cruise_mps: float, cl_min: float
     best["wing_loading_kg_m2"] = lift_mass_kg / best["wing_area_m2"]
     best["span_capped"] = max_span_m is not None and best["aspect_ratio"] < max_ar - 1e-9
     best["planform"] = "linear"
-    best["taper_ratio"] = taper_ratio
-    best["bending_relief_factor"] = relief
-    best["root_chord_m"] = 2 * best["chord_m"] / (1 + taper_ratio)
-    best["tip_chord_m"] = taper_ratio * best["root_chord_m"]
+    best["root_chord_m"] = 2 * best["chord_m"] / (1 + best["taper_ratio"])
+    best["tip_chord_m"] = best["taper_ratio"] * best["root_chord_m"]
     return best
 
 
@@ -612,7 +731,30 @@ def main() -> None:
     parser.add_argument("--taper-ratio", type=float, default=1.0,
                          help="tip_chord/root_chord (default 1.0 = untapered/rectangular); "
                               "reduces the estimated wing mass via bending_relief_factor(), "
-                              "not accepted together with --planform elliptical")
+                              "not accepted together with --planform elliptical. For --objective "
+                              "combined, use --taper-min/--taper-max instead to search taper jointly "
+                              "with cl/AR rather than fixing it")
+    parser.add_argument("--taper-min", type=float, default=None,
+                         help="lowest taper_ratio to search jointly with cl/AR (--objective combined "
+                              "only); defaults to --taper-ratio (fixed, today's behavior) if omitted. "
+                              "Must be given together with --taper-max")
+    parser.add_argument("--taper-max", type=float, default=None,
+                         help="highest taper_ratio to search jointly with cl/AR (--objective combined "
+                              "only); defaults to --taper-ratio (fixed, today's behavior) if omitted. "
+                              "Must be given together with --taper-min")
+    parser.add_argument("--mass-model", choices=["empirical", "beam"], default="empirical",
+                         help="how wing_mass_g is estimated (default empirical, today's "
+                              "(AR/AR_ref)^ar_mass_exponent heuristic, unchanged): 'beam' instead uses a "
+                              "beam-bending-derived scaling (see wing_mass_g_beam()) with a steeper AR "
+                              "penalty and explicit --load-factor/--airfoil-thickness-ratio dependence, "
+                              "for when those two structural drivers matter more than the fitted exponent")
+    parser.add_argument("--load-factor", type=float, default=LOAD_FACTOR_REF,
+                         help=f"ultimate load factor for --mass-model beam (default {LOAD_FACTOR_REF:g}, "
+                              "a typical small-UAV/utility-category limit estimate, not measured); ignored "
+                              "for --mass-model empirical")
+    parser.add_argument("--airfoil-thickness-ratio", type=float, default=T_C_REF,
+                         help=f"airfoil max thickness / chord for --mass-model beam (default {T_C_REF:g}, "
+                              "matching a typical 2412/4412-class section); ignored for --mass-model empirical")
     parser.add_argument("--planform", choices=["linear", "elliptical"], default="linear",
                          help="wing planform shape (default linear = today's rectangular/tapered "
                               "geometry via --taper-ratio); elliptical fixes tip_chord_m to 0 and "
@@ -655,6 +797,12 @@ def main() -> None:
                 parser.error("--hover-s and --cruise-s are required for --objective combined")
     if args.taper_ratio <= 0.0:
         parser.error(f"--taper-ratio must be > 0 (tip_chord/root_chord), got {args.taper_ratio}")
+    if (args.taper_min is None) != (args.taper_max is None):
+        parser.error("--taper-min and --taper-max must be given together")
+    if args.taper_min is not None and args.objective != "combined":
+        parser.error("--taper-min/--taper-max are only supported for --objective combined")
+    if args.taper_min is not None and (args.taper_min <= 0.0 or args.taper_max < args.taper_min):
+        parser.error(f"need 0 < --taper-min <= --taper-max, got {args.taper_min}, {args.taper_max}")
     if args.out and (args.num_rotors is None or args.base_mass_g is None):
         parser.error("--num-rotors and --base-mass-g are required with --out -- VehicleType can't load an entry without them")
 
@@ -662,7 +810,8 @@ def main() -> None:
         result = optimize_wing(
             args.lift_mass_kg, args.cruise_mps, args.cl, args.min_ar, args.max_ar,
             args.max_span_m, args.areal_density_g_m2, args.ar_mass_exponent,
-            taper_ratio=args.taper_ratio, planform=args.planform,
+            taper_ratio=args.taper_ratio, planform=args.planform, mass_model=args.mass_model,
+            load_factor=args.load_factor, thickness_ratio=args.airfoil_thickness_ratio,
         )
         cl_used = args.cl
     elif args.objective == "drag":
@@ -677,8 +826,9 @@ def main() -> None:
         # winning mean chord into root/tip and to relieve the mass estimate, same
         # math optimize_wing() uses for its own taper_ratio handling.
         relief = bending_relief_factor("linear", args.taper_ratio)
-        result["wing_mass_g"] = wing_mass_g(result["wing_area_m2"], result["aspect_ratio"],
-                                             args.areal_density_g_m2, args.ar_mass_exponent, bending_relief_factor=relief)
+        result["wing_mass_g"] = compute_wing_mass_g(args.mass_model, result["wing_area_m2"], result["aspect_ratio"],
+                                                      args.areal_density_g_m2, args.ar_mass_exponent, relief,
+                                                      args.load_factor, args.airfoil_thickness_ratio)
         result["planform"] = "linear"
         result["taper_ratio"] = args.taper_ratio
         result["bending_relief_factor"] = relief
@@ -688,13 +838,20 @@ def main() -> None:
         result = optimize_wing_combined(
             args.lift_mass_kg, args.cruise_mps, args.cl_min, args.cl_max, args.min_ar, args.max_ar,
             args.max_span_m, args.parasite_cd0, args.hover_s, args.cruise_s, args.disk_loading_kg_m2,
-            args.areal_density_g_m2, args.ar_mass_exponent, taper_ratio=args.taper_ratio, sweep_deg=args.sweep_deg,
+            args.areal_density_g_m2, args.ar_mass_exponent,
+            taper_min=args.taper_min if args.taper_min is not None else args.taper_ratio,
+            taper_max=args.taper_max if args.taper_max is not None else args.taper_ratio,
+            mass_model=args.mass_model, load_factor=args.load_factor,
+            thickness_ratio=args.airfoil_thickness_ratio, sweep_deg=args.sweep_deg,
         )
         cl_used = result["cl"]
 
     elliptical = args.planform == "elliptical"
-    tapered = args.taper_ratio != 1.0
+    tapered = result["taper_ratio"] != 1.0
+    taper_searched = args.taper_min is not None and args.taper_max > args.taper_min
     swept_or_twisted = args.sweep_deg != 0.0 or args.twist_deg != 0.0
+    mac_ac = wing_mac_and_ac(result["root_chord_m"], result["taper_ratio"], result["span_m"],
+                              args.planform, args.sweep_deg)
 
     if args.objective in ("drag", "combined"):
         print(f"cl (chosen):        {result['cl']:.4f}   (searched {args.cl_min:g} to {args.cl_max:g})")
@@ -707,9 +864,14 @@ def main() -> None:
     if tapered or elliptical:
         print(f"root_chord_m:       {result['root_chord_m']:.3f}")
         print(f"tip_chord_m:        {result['tip_chord_m']:.3f}")
+    if taper_searched:
+        print(f"taper_ratio:        {result['taper_ratio']:.3f}   (searched {args.taper_min:g} to {args.taper_max:g} jointly with cl/AR)")
     if result["bending_relief_factor"] != 1.0:
         print(f"bending_relief:     {result['bending_relief_factor']:.3f}x wing_mass_g vs. an untapered/rectangular wing")
-    print(f"wing_mass_g:        {result['wing_mass_g']:.1f}")
+    print(f"mac_m:              {mac_ac['mac_m']:.3f}   (mean aerodynamic chord)")
+    print(f"x_ac_from_root_le_m: {mac_ac['x_ac_from_root_le_m']:.3f}   (wing-only aerodynamic center; "
+          f"NOT a static margin -- needs aircraft CG/tail too)")
+    print(f"wing_mass_g:        {result['wing_mass_g']:.1f}" + (f"   (--mass-model {args.mass_model})" if args.mass_model != "empirical" else ""))
     print(f"wing_loading_kg_m2: {result['wing_loading_kg_m2']:.2f}"
           + (f"  WARNING: exceeds {MAX_WING_LOADING_KG_M2:g} kg/m^2 sanity limit" if result["wing_loading_kg_m2"] > MAX_WING_LOADING_KG_M2 else ""))
     if args.objective in ("drag", "combined"):
@@ -756,7 +918,9 @@ def main() -> None:
                 "parasite_cd0": args.parasite_cd0,
                 "min_ar": args.min_ar, "max_ar": args.max_ar, "max_span_m": args.max_span_m,
                 "areal_density_g_m2": args.areal_density_g_m2, "ar_mass_exponent": args.ar_mass_exponent,
-                "taper_ratio": args.taper_ratio, "planform": args.planform,
+                "taper_ratio": args.taper_ratio, "taper_min": args.taper_min, "taper_max": args.taper_max,
+                "planform": args.planform, "mass_model": args.mass_model, "load_factor": args.load_factor,
+                "airfoil_thickness_ratio": args.airfoil_thickness_ratio,
                 "sweep_deg": args.sweep_deg, "twist_deg": args.twist_deg,
                 "naca": args.naca, "closed_te": not args.open_te, "airfoil_dat": args.airfoil_dat,
                 "hover_s": args.hover_s, "cruise_s": args.cruise_s, "disk_loading_kg_m2": args.disk_loading_kg_m2,
@@ -767,6 +931,10 @@ def main() -> None:
             "chord_m": round(result["chord_m"], 4),
             "root_chord_m": round(result["root_chord_m"], 4),
             "tip_chord_m": round(result["tip_chord_m"], 4),
+            "taper_ratio": round(result["taper_ratio"], 4),
+            "mac_m": round(mac_ac["mac_m"], 4),
+            "y_mac_m": round(mac_ac["y_mac_m"], 4),
+            "x_ac_from_root_le_m": round(mac_ac["x_ac_from_root_le_m"], 4),
             "wing_mass_g": round(result["wing_mass_g"], 2),
             "bending_relief_factor": round(result["bending_relief_factor"], 4),
             "wing_loading_kg_m2": round(result["wing_loading_kg_m2"], 3),
