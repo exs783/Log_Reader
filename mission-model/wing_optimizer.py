@@ -25,6 +25,17 @@ Two objectives (--objective):
   as the mass objective); --planform elliptical and --naca/--airfoil-dat
   export aren't wired into this objective yet.
 
+  combined: the "actually find the best wing" objective. Same (cl,
+  aspect-ratio) grid search as drag, but scores each candidate by total
+  mission energy (hover + cruise) instead of drag alone, via --hover-s/
+  --cruise-s and a rotor --disk-loading-kg-m2 estimate -- a heavier wing
+  costs more to hover (momentum-theory induced power), a low-AR/high-cdi
+  wing costs more to cruise, so the optimum is a real interior tradeoff
+  point instead of drag's "AR only helps, never hurts" or mass's "AR only
+  hurts, never helps." Same restrictions as drag today (rectangular/tapered
+  planform only, no --naca/--airfoil-dat wired into the search itself --
+  both still work fine against the winning geometry afterward).
+
 Pass --naca (a 4-digit code, e.g. 2412) to also print SolidWorks Equation
 Driven Curve equations for that airfoil at the optimized chord -- paste-ready
 global variables plus parametric x(t)/y(t) for the upper and lower surfaces.
@@ -376,13 +387,32 @@ def oswald_efficiency(aspect_ratio: float, sweep_deg: float = 0.0) -> float:
     moderately swept subsonic wing -- the same formula
     MyProjectsMK/Wing_optimization uses for its drag-minimizing sizing:
     e0 = 4.61*(1 - 0.045*AR^0.68)*cos(sweep)^0.15 - 3.1. Not meant for
-    delta/highly-swept planforms.
+    delta/highly-swept planforms. Also not meant for very high aspect
+    ratio: at zero sweep this crosses zero around AR~18.5 and goes negative
+    beyond it, which flips induced_drag_coefficient()'s sign -- keep
+    --max-ar comfortably below that for --objective drag/combined.
     """
     return 4.61 * (1 - 0.045 * aspect_ratio**0.68) * math.cos(math.radians(sweep_deg)) ** 0.15 - 3.1
 
 
 def induced_drag_coefficient(cl: float, aspect_ratio: float, oswald_e: float) -> float:
     return cl * cl / (math.pi * aspect_ratio * oswald_e)
+
+
+def _cl_ar_candidate(lift_mass_kg: float, cruise_mps: float, cl: float, ar: float,
+                      parasite_cd0: float, sweep_deg: float) -> dict:
+    """One (cl, aspect_ratio) grid point's area/span/drag, shared by
+    optimize_wing_drag() and optimize_wing_combined() so the two searches
+    can't drift apart on how a candidate's aerodynamics are computed."""
+    area_m2 = required_wing_area_m2(lift_mass_kg, cruise_mps, cl)
+    span_m = math.sqrt(ar * area_m2)
+    e0 = oswald_efficiency(ar, sweep_deg)
+    cdi = induced_drag_coefficient(cl, ar, e0)
+    drag_n = 0.5 * RHO_AIR * cruise_mps * cruise_mps * area_m2 * (parasite_cd0 + cdi)
+    return {
+        "cl": cl, "aspect_ratio": ar, "span_m": span_m, "wing_area_m2": area_m2,
+        "oswald_efficiency": e0, "induced_cd": cdi, "parasite_cd0": parasite_cd0, "drag_n": drag_n,
+    }
 
 
 def optimize_wing_drag(lift_mass_kg: float, cruise_mps: float, cl_min: float, cl_max: float,
@@ -405,20 +435,13 @@ def optimize_wing_drag(lift_mass_kg: float, cruise_mps: float, cl_min: float, cl
     best = None
     for ci in range(cl_steps + 1):
         cl = cl_min + (cl_max - cl_min) * ci / cl_steps
-        area_m2 = required_wing_area_m2(lift_mass_kg, cruise_mps, cl)
         for ai in range(ar_steps + 1):
             ar = min_ar + (max_ar - min_ar) * ai / ar_steps
-            span_m = math.sqrt(ar * area_m2)
-            if max_span_m is not None and span_m > max_span_m:
+            candidate = _cl_ar_candidate(lift_mass_kg, cruise_mps, cl, ar, parasite_cd0, sweep_deg)
+            if max_span_m is not None and candidate["span_m"] > max_span_m:
                 continue
-            e0 = oswald_efficiency(ar, sweep_deg)
-            cdi = induced_drag_coefficient(cl, ar, e0)
-            drag_n = 0.5 * RHO_AIR * cruise_mps * cruise_mps * area_m2 * (parasite_cd0 + cdi)
-            if best is None or drag_n < best["drag_n"]:
-                best = {
-                    "cl": cl, "aspect_ratio": ar, "span_m": span_m, "wing_area_m2": area_m2,
-                    "oswald_efficiency": e0, "induced_cd": cdi, "parasite_cd0": parasite_cd0, "drag_n": drag_n,
-                }
+            if best is None or candidate["drag_n"] < best["drag_n"]:
+                best = candidate
 
     if best is None:
         raise ValueError(
@@ -433,6 +456,89 @@ def optimize_wing_drag(lift_mass_kg: float, cruise_mps: float, cl_min: float, cl
     return best
 
 
+def optimize_wing_combined(lift_mass_kg: float, cruise_mps: float, cl_min: float, cl_max: float,
+                            min_ar: float, max_ar: float, max_span_m: float | None,
+                            parasite_cd0: float, hover_s: float, cruise_s: float, disk_loading_kg_m2: float,
+                            areal_density_g_m2: float, ar_mass_exponent: float, taper_ratio: float = 1.0,
+                            sweep_deg: float = 0.0, cl_steps: int = 100, ar_steps: int = 100) -> dict:
+    """Grid-search (cl, aspect_ratio) jointly to minimize total mission
+    energy -- the tradeoff-aware "best wing" objective, vs. optimize_wing()'s
+    mass-only search (which has no reason to leave --min-ar without a span
+    cap) and optimize_wing_drag()'s drag-only search (which ignores that a
+    heavier wing costs more to hover).
+
+    Two energy terms, summed:
+
+    - cruise_energy_j = drag_n * cruise_mps * cruise_s -- same drag_n
+      optimize_wing_drag() computes (parasite + induced), times cruise
+      duration. Favors higher aspect ratio (lower induced drag).
+    - hover_energy_j = hover_power_w * hover_s, where hover_power_w is a
+      momentum-theory induced-power estimate for lifting the *whole*
+      airframe (lift_mass_kg + this candidate's wing_mass_g) at a rotor
+      disk area back-solved from disk_loading_kg_m2 at lift_mass_kg (the
+      disk is a fixed piece of hardware, sized once for the airframe's
+      baseline mass -- it doesn't change per wing candidate, only the
+      weight it has to lift does): P = T^1.5 / sqrt(2*rho*A_disk). Favors
+      lower aspect ratio and higher cl (both shrink wing_mass_g).
+
+    No induced/profile-power losses, motor/prop efficiency, or non-hover
+    transition phases are modeled -- same "labeled physical estimate, not a
+    real mission sim" spirit as the rest of this file (see parasite_cd0's
+    default). taper_ratio isn't searched (same as optimize_wing_drag()) --
+    it's a fixed input applied to the winning candidate's mass and root/tip
+    chords after the fact.
+    """
+    if cl_min <= 0.0 or cl_max <= cl_min:
+        raise ValueError(f"need 0 < cl_min < cl_max, got cl_min={cl_min}, cl_max={cl_max}")
+    if disk_loading_kg_m2 <= 0.0:
+        raise ValueError(f"--disk-loading-kg-m2 must be > 0, got {disk_loading_kg_m2}")
+    if hover_s < 0.0 or cruise_s < 0.0:
+        raise ValueError(f"--hover-s/--cruise-s must be >= 0, got hover_s={hover_s}, cruise_s={cruise_s}")
+
+    relief = bending_relief_factor("linear", taper_ratio)
+    disk_area_m2 = lift_mass_kg / disk_loading_kg_m2
+
+    best = None
+    for ci in range(cl_steps + 1):
+        cl = cl_min + (cl_max - cl_min) * ci / cl_steps
+        for ai in range(ar_steps + 1):
+            ar = min_ar + (max_ar - min_ar) * ai / ar_steps
+            candidate = _cl_ar_candidate(lift_mass_kg, cruise_mps, cl, ar, parasite_cd0, sweep_deg)
+            if max_span_m is not None and candidate["span_m"] > max_span_m:
+                continue
+            wing_mass_g_val = wing_mass_g(candidate["wing_area_m2"], ar, areal_density_g_m2,
+                                           ar_mass_exponent, bending_relief_factor=relief)
+            total_weight_n = (lift_mass_kg + wing_mass_g_val / 1000.0) * G
+            hover_power_w = total_weight_n**1.5 / math.sqrt(2 * RHO_AIR * disk_area_m2)
+            cruise_energy_j = candidate["drag_n"] * cruise_mps * cruise_s
+            hover_energy_j = hover_power_w * hover_s
+            candidate["wing_mass_g"] = wing_mass_g_val
+            candidate["hover_power_w"] = hover_power_w
+            candidate["cruise_energy_j"] = cruise_energy_j
+            candidate["hover_energy_j"] = hover_energy_j
+            candidate["total_energy_j"] = cruise_energy_j + hover_energy_j
+            if best is None or candidate["total_energy_j"] < best["total_energy_j"]:
+                best = candidate
+
+    if best is None:
+        raise ValueError(
+            f"no (cl, aspect_ratio) combination in cl=[{cl_min}, {cl_max}] x AR=[{min_ar}, {max_ar}] "
+            f"keeps span <= {max_span_m} m for lift_mass_kg={lift_mass_kg} -- raise --max-span-m, "
+            f"raise --cl-max (smaller required area), or lower --min-ar."
+        )
+
+    best["disk_area_m2"] = disk_area_m2
+    best["chord_m"] = best["wing_area_m2"] / best["span_m"]
+    best["wing_loading_kg_m2"] = lift_mass_kg / best["wing_area_m2"]
+    best["span_capped"] = max_span_m is not None and best["aspect_ratio"] < max_ar - 1e-9
+    best["planform"] = "linear"
+    best["taper_ratio"] = taper_ratio
+    best["bending_relief_factor"] = relief
+    best["root_chord_m"] = 2 * best["chord_m"] / (1 + taper_ratio)
+    best["tip_chord_m"] = taper_ratio * best["root_chord_m"]
+    return best
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--lift-mass-kg", type=float, required=True, help="weight the wing must offload from the rotors, kg")
@@ -441,17 +547,30 @@ def main() -> None:
                          help="lift coefficient at cruise attitude (matches vehicle_configs wing_cl); "
                               "required for --objective mass, not accepted for --objective drag (there cl "
                               "is a search variable -- use --cl-min/--cl-max instead)")
-    parser.add_argument("--objective", choices=["mass", "drag"], default="mass",
+    parser.add_argument("--objective", choices=["mass", "drag", "combined"], default="mass",
                          help="what to optimize (default mass): 'mass' fixes --cl and searches aspect ratio "
                               "for minimum structural mass (today's behavior); 'drag' searches --cl-min.."
                               "--cl-max and aspect ratio jointly for minimum total cruise drag (parasite + "
-                              "induced, via an Oswald-efficiency estimate); --taper-ratio is supported, "
-                              "not combinable with --planform elliptical, --naca, or --airfoil-dat")
-    parser.add_argument("--cl-min", type=float, default=None, help="lowest lift coefficient to search (--objective drag only)")
+                              "induced, via an Oswald-efficiency estimate); 'combined' does the same search "
+                              "but scores minimum total mission energy (hover + cruise, see --hover-s/"
+                              "--cruise-s/--disk-loading-kg-m2) -- the recommended objective for finding an "
+                              "actual best wing rather than a boundary of the search range. --taper-ratio is "
+                              "supported for all three; drag/combined aren't combinable with --planform "
+                              "elliptical, --naca, or --airfoil-dat")
+    parser.add_argument("--cl-min", type=float, default=None, help="lowest lift coefficient to search (--objective drag/combined only)")
     parser.add_argument("--cl-max", type=float, default=None,
-                         help="highest lift coefficient to search (--objective drag only) -- also doubles as "
-                              "the stall-margin ceiling, so keep it below the airfoil's real Cl_max with "
-                              "whatever margin you want")
+                         help="highest lift coefficient to search (--objective drag/combined only) -- also "
+                              "doubles as the stall-margin ceiling, so keep it below the airfoil's real "
+                              "Cl_max with whatever margin you want")
+    parser.add_argument("--hover-s", type=float, default=None,
+                         help="seconds spent hovering in the mission this wing is sized for (--objective combined only)")
+    parser.add_argument("--cruise-s", type=float, default=None,
+                         help="seconds spent at cruise in the mission this wing is sized for (--objective combined only)")
+    parser.add_argument("--disk-loading-kg-m2", type=float, default=25.0,
+                         help="rotor disk loading estimate, kg of lift_mass_kg per m^2 of total rotor disk "
+                              "area (default 25.0, a typical heavy-lift multirotor estimate, not measured) "
+                              "-- sets the fixed disk area momentum-theory hover power is computed against "
+                              "for --objective combined")
     parser.add_argument("--parasite-cd0", type=float, default=0.045,
                          help="zero-lift drag coefficient referenced to wing area, matching Mission_Model.py's "
                               "VehicleType.parasite_cd0 default (default 0.045); drives --objective drag's "
@@ -527,10 +646,13 @@ def main() -> None:
             parser.error("--cl is required for --objective mass")
     else:
         if args.cl_min is None or args.cl_max is None:
-            parser.error("--cl-min and --cl-max are required for --objective drag (cl is a search variable there, not fixed)")
+            parser.error(f"--cl-min and --cl-max are required for --objective {args.objective} (cl is a search variable there, not fixed)")
         if args.planform == "elliptical" or args.naca or args.airfoil_dat:
-            parser.error("--objective drag only supports a linear (rectangular/tapered) planform today -- "
+            parser.error(f"--objective {args.objective} only supports a linear (rectangular/tapered) planform today -- "
                           "drop --planform elliptical / --naca / --airfoil-dat")
+        if args.objective == "combined":
+            if args.hover_s is None or args.cruise_s is None:
+                parser.error("--hover-s and --cruise-s are required for --objective combined")
     if args.taper_ratio <= 0.0:
         parser.error(f"--taper-ratio must be > 0 (tip_chord/root_chord), got {args.taper_ratio}")
     if args.out and (args.num_rotors is None or args.base_mass_g is None):
@@ -543,7 +665,7 @@ def main() -> None:
             taper_ratio=args.taper_ratio, planform=args.planform,
         )
         cl_used = args.cl
-    else:
+    elif args.objective == "drag":
         result = optimize_wing_drag(
             args.lift_mass_kg, args.cruise_mps, args.cl_min, args.cl_max, args.min_ar, args.max_ar,
             args.max_span_m, args.parasite_cd0, sweep_deg=args.sweep_deg,
@@ -562,16 +684,23 @@ def main() -> None:
         result["bending_relief_factor"] = relief
         result["root_chord_m"] = 2 * result["chord_m"] / (1 + args.taper_ratio)
         result["tip_chord_m"] = args.taper_ratio * result["root_chord_m"]
+    else:
+        result = optimize_wing_combined(
+            args.lift_mass_kg, args.cruise_mps, args.cl_min, args.cl_max, args.min_ar, args.max_ar,
+            args.max_span_m, args.parasite_cd0, args.hover_s, args.cruise_s, args.disk_loading_kg_m2,
+            args.areal_density_g_m2, args.ar_mass_exponent, taper_ratio=args.taper_ratio, sweep_deg=args.sweep_deg,
+        )
+        cl_used = result["cl"]
 
     elliptical = args.planform == "elliptical"
     tapered = args.taper_ratio != 1.0
     swept_or_twisted = args.sweep_deg != 0.0 or args.twist_deg != 0.0
 
-    if args.objective == "drag":
+    if args.objective in ("drag", "combined"):
         print(f"cl (chosen):        {result['cl']:.4f}   (searched {args.cl_min:g} to {args.cl_max:g})")
     print(f"wing_area_m2:       {result['wing_area_m2']:.4f}")
     print(f"aspect_ratio:       {result['aspect_ratio']:.3f}"
-          + ("" if result["span_capped"] or args.objective == "drag"
+          + ("" if result["span_capped"] or args.objective in ("drag", "combined")
              else "  (unconstrained -- equals --min-ar; nothing in this model favors higher AR without a span cap)"))
     print(f"span_m:             {result['span_m']:.3f}")
     print(f"chord_m:            {result['chord_m']:.3f}" + ("  (mean chord)" if tapered or elliptical else ""))
@@ -583,11 +712,17 @@ def main() -> None:
     print(f"wing_mass_g:        {result['wing_mass_g']:.1f}")
     print(f"wing_loading_kg_m2: {result['wing_loading_kg_m2']:.2f}"
           + (f"  WARNING: exceeds {MAX_WING_LOADING_KG_M2:g} kg/m^2 sanity limit" if result["wing_loading_kg_m2"] > MAX_WING_LOADING_KG_M2 else ""))
-    if args.objective == "drag":
+    if args.objective in ("drag", "combined"):
         print(f"oswald_efficiency:  {result['oswald_efficiency']:.4f}")
         print(f"induced_cd:         {result['induced_cd']:.5f}")
         print(f"parasite_cd0:       {result['parasite_cd0']:.4f}")
         print(f"drag_n:             {result['drag_n']:.4f}   (at cruise, parasite + induced)")
+    if args.objective == "combined":
+        print(f"disk_area_m2:       {result['disk_area_m2']:.4f}   (from lift_mass_kg / --disk-loading-kg-m2={args.disk_loading_kg_m2:g})")
+        print(f"hover_power_w:      {result['hover_power_w']:.2f}   (momentum-theory induced power estimate)")
+        print(f"hover_energy_j:     {result['hover_energy_j']:.1f}   (over --hover-s={args.hover_s:g})")
+        print(f"cruise_energy_j:    {result['cruise_energy_j']:.1f}   (over --cruise-s={args.cruise_s:g})")
+        print(f"total_energy_j:     {result['total_energy_j']:.1f}   (minimized objective)")
     if args.sweep_deg:
         print(f"sweep_deg (LE):     {args.sweep_deg:.2f}")
     if args.twist_deg:
@@ -624,6 +759,7 @@ def main() -> None:
                 "taper_ratio": args.taper_ratio, "planform": args.planform,
                 "sweep_deg": args.sweep_deg, "twist_deg": args.twist_deg,
                 "naca": args.naca, "closed_te": not args.open_te, "airfoil_dat": args.airfoil_dat,
+                "hover_s": args.hover_s, "cruise_s": args.cruise_s, "disk_loading_kg_m2": args.disk_loading_kg_m2,
             },
             "wing_area_m2": round(result["wing_area_m2"], 4),
             "aspect_ratio": round(result["aspect_ratio"], 4),
@@ -635,6 +771,11 @@ def main() -> None:
             "bending_relief_factor": round(result["bending_relief_factor"], 4),
             "wing_loading_kg_m2": round(result["wing_loading_kg_m2"], 3),
         }
+        if args.objective == "combined":
+            record["hover_power_w"] = round(result["hover_power_w"], 3)
+            record["hover_energy_j"] = round(result["hover_energy_j"], 2)
+            record["cruise_energy_j"] = round(result["cruise_energy_j"], 2)
+            record["total_energy_j"] = round(result["total_energy_j"], 2)
         records = []
         if os.path.exists(args.geometry_out):
             with open(args.geometry_out) as f:

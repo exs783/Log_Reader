@@ -7,7 +7,7 @@ from wing_optimizer import (
     naca4_params, naca4_airfoil_point, solidworks_naca4_equations, rotate_about_pivot,
     bending_relief_factor, elliptical_chord_m,
     parse_selig_dat, place_station_points, wing_stations,
-    oswald_efficiency, induced_drag_coefficient, optimize_wing_drag,
+    oswald_efficiency, induced_drag_coefficient, optimize_wing_drag, optimize_wing_combined,
     G as WING_OPT_G, RHO_AIR as WING_OPT_RHO_AIR,
 )
 from Mission_Model import G, RHO_AIR
@@ -361,5 +361,54 @@ rect_drag = optimize_wing_drag(lift_mass_kg=12.0, cruise_mps=25.0, cl_min=0.3, c
                                 cl_steps=40, ar_steps=40)
 assert rect_drag["cl"] == drag_best["cl"] and rect_drag["aspect_ratio"] == drag_best["aspect_ratio"], \
     "optimize_wing_drag doesn't take a taper_ratio -- main() applies it after the fact, mirroring optimize_wing()"
+
+
+# optimize_wing_combined: rejects a bad cl range, disk loading, or negative durations.
+for bad_kwargs in [
+    dict(cl_min=0.6, cl_max=0.3),
+    dict(disk_loading_kg_m2=0.0),
+    dict(hover_s=-1.0),
+]:
+    kwargs = dict(lift_mass_kg=12.0, cruise_mps=25.0, cl_min=0.3, cl_max=1.0, min_ar=4.0, max_ar=12.0,
+                  max_span_m=None, parasite_cd0=0.045, hover_s=120.0, cruise_s=600.0,
+                  disk_loading_kg_m2=25.0, areal_density_g_m2=1500.0, ar_mass_exponent=0.5)
+    kwargs.update(bad_kwargs)
+    try:
+        optimize_wing_combined(**kwargs)
+        raise AssertionError(f"should have rejected {bad_kwargs}")
+    except ValueError:
+        pass
+
+# optimize_wing_combined: the "best wing" objective must land on a real
+# interior tradeoff, not a search-range boundary -- and must actually shift
+# the right way as the mission's balance of hover vs. cruise time shifts:
+# more hover time should favor a lighter (lower-AR) wing, more cruise time
+# should favor a lower-drag (higher-AR) wing. AR bounds stay <=12 (same as
+# the drag-objective tests above) since oswald_efficiency() isn't valid much
+# past AR~18.5 (see its docstring) and this search's own default max-ar
+# would otherwise wander into that.
+baseline = optimize_wing_combined(lift_mass_kg=12.0, cruise_mps=25.0, cl_min=0.3, cl_max=1.0,
+                                   min_ar=4.0, max_ar=12.0, max_span_m=None, parasite_cd0=0.045,
+                                   hover_s=120.0, cruise_s=600.0, disk_loading_kg_m2=25.0,
+                                   areal_density_g_m2=1500.0, ar_mass_exponent=0.5)
+assert 4.0 < baseline["aspect_ratio"] < 12.0, \
+    f"combined objective should find an interior AR optimum, got {baseline['aspect_ratio']}"
+assert math.isclose(baseline["total_energy_j"], baseline["hover_energy_j"] + baseline["cruise_energy_j"], rel_tol=1e-9)
+lift_n = 0.5 * RHO_AIR * baseline["cl"] * baseline["wing_area_m2"] * 25.0 * 25.0
+assert math.isclose(lift_n, 12.0 * G, rel_tol=1e-6), "chosen (cl, area) must still satisfy the lift equation"
+
+more_hover = optimize_wing_combined(lift_mass_kg=12.0, cruise_mps=25.0, cl_min=0.3, cl_max=1.0,
+                                     min_ar=4.0, max_ar=12.0, max_span_m=None, parasite_cd0=0.045,
+                                     hover_s=1200.0, cruise_s=600.0, disk_loading_kg_m2=25.0,
+                                     areal_density_g_m2=1500.0, ar_mass_exponent=0.5)
+assert more_hover["wing_mass_g"] < baseline["wing_mass_g"], \
+    "more hover time should push the optimum toward a lighter wing"
+
+more_cruise = optimize_wing_combined(lift_mass_kg=12.0, cruise_mps=25.0, cl_min=0.3, cl_max=1.0,
+                                      min_ar=4.0, max_ar=12.0, max_span_m=None, parasite_cd0=0.045,
+                                      hover_s=120.0, cruise_s=6000.0, disk_loading_kg_m2=25.0,
+                                      areal_density_g_m2=1500.0, ar_mass_exponent=0.5)
+assert more_cruise["aspect_ratio"] > baseline["aspect_ratio"], \
+    "more cruise time should push the optimum toward a higher (lower-induced-drag) aspect ratio"
 
 print("wing_optimizer self-check: all assertions passed")
