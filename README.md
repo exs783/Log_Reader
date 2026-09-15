@@ -7,7 +7,7 @@ This is a html/flask based webpage designed to allow for easy log inspection.
 log-dashboard
 ├── log_dashboard.html
 ├── models
-│   └── Flight Path good.html
+│   └── flight_path_good.html
 ├── python_backend.py
 └── uploads
     └── somelog.BIN
@@ -31,13 +31,13 @@ or
 `pip install -r requirements.txt`
 
 run the program
-`uv run log-dashboard/python_backend.py`
+`uv run gunicorn --bind 0.0.0.0:8000 wsgi:app`
 or 
-`python3 log-dashboard/python_backend.py`
+`gunicorn --bind 0.0.0.0:8000 wsgi:app`
 
 this should serve the flask app on your local network, you may upload logs via the webpage or place them directly into the uploads folder
 
-** future work **
+**future work**
 - we may dockerize this and deploy it to a sbc
 - auto upload pipeline after flight 
 - mission model?

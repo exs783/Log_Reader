@@ -97,10 +97,10 @@ def detect_frame(dfs):
                 n = str(row[name_col]).strip().upper()
                 if n == 'FRAME_TYPE':
                     try: frame_type_val  = int(float(row[value_col]))
-                    except: pass
+                    except: print(f"failed to assign frame type {row} : {n}") 
                 elif n == 'FRAME_CLASS':
                     try: frame_class_val = int(float(row[value_col]))
-                    except: pass
+                    except: print(f"failed to assign frame class {row} : {n}")
 
     CLASS_MAP = {1:4, 2:6, 3:8, 4:8, 5:6, 6:3, 7:1, 8:2, 9:2, 10:10, 12:12}
 
@@ -677,9 +677,10 @@ def analyze_gps(dfs):
             # Calculate position changes
             lat_diff = np.diff(lat)
             lng_diff = np.diff(lng)
-            alt_diff = np.diff(alt)
+            alt_diff = np.diff(alt) # not used
 
             # Approximate distance in meters (rough conversion at equator)
+            # not used
             lat_dist = lat_diff * 111000
             lng_dist = lng_diff * 111000 * np.cos(np.radians(np.mean(lat)))
 
@@ -724,6 +725,7 @@ def analyze_barometer(dfs):
         if 'Alt' in baro:
             altitude = baro['Alt'].tolist()
             # Downsample for plotting
+            # ts_plot not used
             ts_plot, alt_plot = downsample_for_plotting(timestamps, altitude, max_points=5000)
             analysis['altitude'] = alt_plot
 
@@ -1058,8 +1060,8 @@ def health():
 def too_large(e):
     return jsonify({'error': 'File too large. Maximum size: 500MB'}), 413
 
-
+#
 if __name__ == '__main__':
-    print("Starting Pixhawk Log Reader Backend...")
-    print(f"Upload folder: {os.path.abspath(app.config['UPLOAD_FOLDER'])}")
-    app.run(debug=True, host='0.0.0.0', port=5001)
+#    print("Starting Pixhawk Log Reader Backend...")
+#    print(f"Upload folder: {os.path.abspath(app.config['UPLOAD_FOLDER'])}")
+    app.run()
