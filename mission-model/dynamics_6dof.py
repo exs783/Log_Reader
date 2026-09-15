@@ -85,3 +85,40 @@ def quat_log_error(q: np.ndarray, q_target: np.ndarray) -> np.ndarray:
 
 HOVER_QUAT = np.array([1.0, 0.0, 0.0, 0.0])
 CRUISE_QUAT = quat_from_axis_angle(np.array([0.0, 1.0, 0.0]), math.pi / 2)
+
+
+def estimate_inertia_kg_m2(mass_kg: float, body_length_m: float, wing_span_m: float) -> tuple[float, float, float]:
+    """ponytail: coarse geometric placeholder -- mass split 50/50 between a
+    fuselage rod along body x (length body_length_m) and a wing rod along
+    body y (length wing_span_m), each I=(1/12)*m*L^2. Wrong by some constant
+    factor for any real airframe. Upgrade path: set
+    VehicleType.inertia_kg_m2 once CAD gives real principal moments."""
+    if body_length_m <= 0.0 and wing_span_m <= 0.0:
+        raise ValueError("estimate_inertia_kg_m2: need a positive body_length_m or wing_span_m")
+    mass_fuselage_kg = mass_kg * 0.5
+    mass_wing_kg = mass_kg * 0.5
+    i_fuselage = (mass_fuselage_kg * body_length_m ** 2) / 12.0
+    i_wing = (mass_wing_kg * wing_span_m ** 2) / 12.0
+    ixx = i_wing  # roll: resisted by wing-span mass distribution
+    iyy = i_fuselage  # pitch: resisted by fuselage-length mass distribution -- the transition axis
+    izz = i_fuselage + i_wing  # yaw: resisted by both
+    return ixx, iyy, izz
+
+
+def estimate_max_torque_n_m(thrust_min_n_per_motor: float, thrust_max_n_per_motor: float,
+                             body_length_m: float, wing_span_m: float) -> tuple[float, float, float]:
+    """ponytail: coarse placeholder -- (max-min single-motor thrust) times a
+    half-length moment arm per axis, no real per-rotor allocation matrix.
+    Upgrade path: VehicleType.max_control_torque_n_m once CAD/actuator
+    layout is known. Yaw authority (prop reaction torque / differential
+    drag, not thrust) is much weaker than roll/pitch here -- approximated
+    as 20% of the pitch figure."""
+    if body_length_m <= 0.0 and wing_span_m <= 0.0:
+        raise ValueError("estimate_max_torque_n_m: need a positive body_length_m or wing_span_m")
+    thrust_range_n = max(thrust_max_n_per_motor - thrust_min_n_per_motor, 0.0)
+    pitch_arm_m = body_length_m / 2.0 if body_length_m > 0.0 else wing_span_m / 2.0
+    roll_arm_m = wing_span_m / 2.0 if wing_span_m > 0.0 else body_length_m / 2.0
+    pitch_torque_n_m = thrust_range_n * pitch_arm_m
+    roll_torque_n_m = thrust_range_n * roll_arm_m
+    yaw_torque_n_m = 0.2 * pitch_torque_n_m
+    return roll_torque_n_m, pitch_torque_n_m, yaw_torque_n_m

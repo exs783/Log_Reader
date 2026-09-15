@@ -8,6 +8,7 @@ from dynamics_6dof import (
     quat_mult, quat_normalize, quat_conjugate, quat_rotate_vector,
     quat_derivative, quat_from_axis_angle, quat_log, quat_log_error,
     HOVER_QUAT, CRUISE_QUAT, G as DYN_G, RHO_AIR as DYN_RHO_AIR,
+    estimate_inertia_kg_m2, estimate_max_torque_n_m,
 )
 from Mission_Model import G, RHO_AIR
 
@@ -68,6 +69,40 @@ def test_quat_conjugate_of_unit_quaternion_is_its_inverse():
     q = quat_normalize(np.array([0.7, 0.1, 0.2, 0.3]))
     identity = quat_mult(q, quat_conjugate(q))
     assert np.allclose(identity, [1.0, 0.0, 0.0, 0.0], atol=1e-9)
+
+
+def test_estimate_inertia_matches_hand_computed_rod_formula():
+    ixx, iyy, izz = estimate_inertia_kg_m2(mass_kg=2.0, body_length_m=1.0, wing_span_m=2.0)
+    expected_i_fuselage = (1.0 * 1.0 ** 2) / 12.0  # half the mass, rod along body length
+    expected_i_wing = (1.0 * 2.0 ** 2) / 12.0  # half the mass, rod along wingspan
+    assert math.isclose(iyy, expected_i_fuselage)  # pitch: fuselage-length mass distribution
+    assert math.isclose(ixx, expected_i_wing)  # roll: wingspan mass distribution
+    assert math.isclose(izz, expected_i_fuselage + expected_i_wing)  # yaw: both
+
+
+def test_estimate_inertia_rejects_zero_geometry():
+    try:
+        estimate_inertia_kg_m2(mass_kg=2.0, body_length_m=0.0, wing_span_m=0.0)
+        raise AssertionError("should have rejected all-zero geometry")
+    except ValueError:
+        pass
+
+
+def test_estimate_max_torque_scales_with_thrust_range_and_arm():
+    roll, pitch, yaw = estimate_max_torque_n_m(thrust_min_n_per_motor=10.0, thrust_max_n_per_motor=30.0,
+                                                body_length_m=1.0, wing_span_m=2.0)
+    assert math.isclose(pitch, 20.0 * 0.5)  # thrust range 20N * half body length
+    assert math.isclose(roll, 20.0 * 1.0)  # thrust range 20N * half wingspan
+    assert math.isclose(yaw, 0.2 * pitch)
+
+
+def test_estimate_max_torque_rejects_zero_geometry():
+    try:
+        estimate_max_torque_n_m(thrust_min_n_per_motor=10.0, thrust_max_n_per_motor=30.0,
+                                 body_length_m=0.0, wing_span_m=0.0)
+        raise AssertionError("should have rejected all-zero geometry")
+    except ValueError:
+        pass
 
 
 if __name__ == "__main__":
