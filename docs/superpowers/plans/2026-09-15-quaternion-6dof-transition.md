@@ -89,7 +89,7 @@ def test_quat_log_error_zero_when_aligned():
 
 def test_quat_log_error_matches_hand_derived_hover_to_cruise_vector():
     err = quat_log_error(HOVER_QUAT, CRUISE_QUAT)
-    assert np.allclose(err, [0.0, -math.pi / 2, 0.0], atol=1e-9)
+    assert np.allclose(err, [0.0, math.pi / 2, 0.0], atol=1e-9)
 
 
 def test_quat_mult_is_associative():
@@ -211,8 +211,10 @@ def quat_log_error(q: np.ndarray, q_target: np.ndarray) -> np.ndarray:
 
 
 HOVER_QUAT = np.array([1.0, 0.0, 0.0, 0.0])
-CRUISE_QUAT = quat_from_axis_angle(np.array([0.0, 1.0, 0.0]), -math.pi / 2)
+CRUISE_QUAT = quat_from_axis_angle(np.array([0.0, 1.0, 0.0]), math.pi / 2)
 ```
+
+(Corrected during implementation: `+pi/2`, not `-pi/2` — `R_y(+pi/2) @ [0,0,1] = [1,0,0]`, so `+pi/2` is what actually rotates body +z to world +x. Fix the matching `quat_log_error` test expectation below to `[0.0, math.pi / 2, 0.0]` too.)
 
 - [ ] **Step 4: Run test to verify it passes**
 
