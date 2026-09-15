@@ -20,6 +20,7 @@ Mission_Model.segment() integrate attitude between these two references.
 from __future__ import annotations
 
 import math
+import sys
 
 import numpy as np
 from scipy.integrate import solve_ivp
@@ -134,7 +135,22 @@ def _rigid_body_rhs(_t, state, thrust_n, mass_kg, drag_cd, base_area_m2, lift_fn
     v_dir = v / speed if speed > 1e-9 else np.array([1.0, 0.0, 0.0])
 
     thrust_world = quat_rotate_vector(q, np.array([0.0, 0.0, thrust_n]))
-    lift_world = np.array([0.0, 0.0, lift_fn(speed)])
+
+    # Lift acts along a body-fixed axis, so its world direction follows the
+    # vehicle's attitude (the design spec's "true angle of attack" wing
+    # model). Body -x is the axis that lands in the right place at both
+    # reference attitudes -- verified against the definitions above:
+    # CRUISE_QUAT (body +z -> world +x) sends body -x -> world +z, i.e.
+    # lift straight up with the thrust axis horizontal; HOVER_QUAT
+    # (identity) sends body -x -> world -x, i.e. edge-on, no useful lift.
+    # The magnitude uses only the velocity component *perpendicular* to
+    # that axis: a velocity component along the lift axis must not feed
+    # back into more lift along the same axis (that loop is unbounded and
+    # diverged solve_ivp for every real winged vehicle).
+    lift_axis_world = quat_rotate_vector(q, np.array([-1.0, 0.0, 0.0]))
+    lift_axis_world = lift_axis_world / np.linalg.norm(lift_axis_world)
+    v_perp = v - np.dot(v, lift_axis_world) * lift_axis_world
+    lift_world = lift_axis_world * lift_fn(float(np.linalg.norm(v_perp)))
     drag_n = 0.5 * RHO_AIR * drag_cd * (base_area_m2 + parasite_area_m2) * speed * speed
     drag_world = -drag_n * v_dir
     gravity_world = np.array([0.0, 0.0, -mass_kg * G])
@@ -153,24 +169,19 @@ def _rigid_body_rhs(_t, state, thrust_n, mass_kg, drag_cd, base_area_m2, lift_fn
 def _integrate_transition(thrust_n, weight_n, mass_kg, drag_cd, base_area_m2, lift_fn,
                            parasite_area_m2, inertia_kg_m2, max_torque_n_m, kp, kd,
                            q_start, q_target, v0, v_event, event_direction, distance_cap,
-                           speed_slice=slice(3, 6)):
-    # Deviation from the brief: the speed the v_event tracks is configurable
-    # (full 3D velocity norm by default, matching the brief's original
-    # hit_v_event) rather than hard-coded, because the two callers need
-    # different quantities. transition_accel keeps the brief's full-norm
-    # check as given (its own v_target=18 regression test only reaches 18
-    # via the dive-augmented full speed; the pure-forward component tops
-    # out near 16.2 m/s here, verified numerically). transition_decel
-    # instead needs the horizontal-only component (state[3:5]): with this
-    # zero-lift synthetic vehicle, thrust must always exceed weight_n (see
-    # the guard below), so once the body pitches back to hover it
-    # inevitably develops a net climb -- verified numerically, decel's
-    # forward (x) speed decays past v_floor=1.0 around t=7.3s while the
-    # full 3D speed (climb included) instead settles at a steady state
-    # ~9.6 m/s and never crosses the floor, timing out with no event
-    # fired. Both transition functions' own docstrings describe this as a
-    # forward-airspeed transition, so the horizontal projection is the
-    # physically correct quantity for decel's floor check.
+                           return_final_state=False):
+    # Deviation from the brief: v_event tracks the *signed forward* ground
+    # speed (state[3]) rather than the full 3D velocity norm, and the
+    # returned v_final reports that same quantity. Both transition
+    # functions' docstrings describe these as forward-airspeed
+    # transitions, and segment() uses transition_accel's returned speed as
+    # the cruise-phase ground speed for the remaining-distance/energy
+    # calculation -- so a velocity that is mostly climb, or is pointing
+    # backwards, is not "reached v_cruise" in any sense segment() can use.
+    # The sign matters, not just the horizontal projection: with a
+    # magnitude (norm) test, a vehicle blown backwards reads as fast, which
+    # let a hover-attitude vehicle with no pitch authority "reach v_target"
+    # while flying tail-first.
     if thrust_n <= weight_n:
         return None  # can't even support weight, let alone complete a transition
 
@@ -179,7 +190,7 @@ def _integrate_transition(thrust_n, weight_n, mass_kg, drag_cd, base_area_m2, li
     def hit_v_event(_t, state, *_args):
         # scipy passes solve_ivp's `args` tuple to event functions too, not
         # just `fun` -- *_args absorbs it since these events don't need it.
-        return float(np.linalg.norm(state[speed_slice])) - v_event
+        return float(state[3]) - v_event
 
     hit_v_event.terminal = True
     hit_v_event.direction = event_direction
@@ -196,10 +207,22 @@ def _integrate_transition(thrust_n, weight_n, mass_kg, drag_cd, base_area_m2, li
               inertia_kg_m2, max_torque_n_m, kp, kd, q_target),
         events=[hit_v_event, hit_distance], max_step=0.5, rtol=1e-6, atol=1e-8,
     )
+    if sol.status == -1:
+        # Solver breakdown (step size collapsed), not a physical verdict --
+        # scipy's 0 = reached t_span, 1 = termination event. Caller still
+        # gets None (a diverged run is not a usable result), but say so out
+        # loud instead of letting it look like genuine infeasibility.
+        print(f"Warning: 6DOF transition integration diverged at t={float(sol.t[-1]):.3f}s "
+              f"({sol.message}) -- reporting as infeasible.", file=sys.stderr)
+        return None
     if sol.t_events[0].size == 0 and sol.t_events[1].size == 0:
         return None  # neither the target speed nor the distance cap was reached
     final = sol.y[:, -1]
-    return sol.t[-1], float(final[0]), float(np.linalg.norm(final[3:6]))
+    result = (float(sol.t[-1]), float(final[0]), float(final[3]))
+    # return_final_state appends the raw 13-state vector, so a test can check
+    # the attitude actually reached; transition_accel / transition_decel keep
+    # their 3-tuple contract, which segment() depends on.
+    return (*result, final) if return_final_state else result
 
 
 def transition_accel(mass_kg, weight_n, thrust_n, drag_cd, base_area_m2, lift_fn, parasite_area_m2,
@@ -207,7 +230,8 @@ def transition_accel(mass_kg, weight_n, thrust_n, drag_cd, base_area_m2, lift_fn
     """Hover -> cruise attitude transition, powered by thrust redirected via
     quaternion attitude integration instead of the tilt-area trick. Same
     (time_s, distance_m, v_final) | None contract as the retired
-    Mission_Model.py _accel_phase_numeric."""
+    Mission_Model.py _accel_phase_numeric -- v_final is forward ground
+    speed, which is what segment() flies the rest of the leg at."""
     return _integrate_transition(thrust_n, weight_n, mass_kg, drag_cd, base_area_m2, lift_fn,
                                   parasite_area_m2, inertia_kg_m2, max_torque_n_m, kp, kd,
                                   q_start=HOVER_QUAT, q_target=CRUISE_QUAT, v0=v0,
@@ -223,5 +247,4 @@ def transition_decel(mass_kg, weight_n, thrust_n, drag_cd, base_area_m2, lift_fn
     return _integrate_transition(thrust_n, weight_n, mass_kg, drag_cd, base_area_m2, lift_fn,
                                   parasite_area_m2, inertia_kg_m2, max_torque_n_m, kp, kd,
                                   q_start=CRUISE_QUAT, q_target=HOVER_QUAT, v0=v0,
-                                  v_event=v_floor, event_direction=-1, distance_cap=distance_cap,
-                                  speed_slice=slice(3, 5))
+                                  v_event=v_floor, event_direction=-1, distance_cap=distance_cap)
