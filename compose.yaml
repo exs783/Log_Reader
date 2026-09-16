@@ -1,0 +1,20 @@
+services:
+  log-reader:
+    build:
+      context: .
+    ports:
+      - "127.0.0.1:18765:8000"
+    volumes:
+      - ./log-dashboard/uploads:/app/uploads
+    restart: unless-stopped
+    init: true
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=5)"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

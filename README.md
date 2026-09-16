@@ -37,7 +37,22 @@ or
 
 this should serve the flask app on your local network, you may upload logs via the webpage or place them directly into the uploads folder
 
+### Docker
+
+Build and start the service in the background:
+
+`docker compose up -d --build`
+
+Open `http://localhost:18765`.
+
+Uploaded logs persist on the host in `log-dashboard/uploads`. Uploading a file
+with an existing filename replaces that file. The application does not
+automatically delete uploaded logs.
+
+View logs with `docker compose logs -f` and stop with `docker compose down`.
+The container restarts automatically unless it is explicitly stopped.
+
 **future work**
-- we may dockerize this and deploy it to a sbc
+- deploy the Dockerized service to an SBC
 - auto upload pipeline after flight 
 - mission model?
