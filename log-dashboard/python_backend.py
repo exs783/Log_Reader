@@ -10,6 +10,7 @@ from flask_cors import CORS
 import os
 from pathlib import Path
 from datetime import datetime
+from tempfile import TemporaryDirectory
 import numpy as np
 import pandas as pd
 from pymavlink import mavutil
@@ -152,14 +153,17 @@ def load_log(filepath):
                    'EKF1', 'NKF1', 'MODE', 'MSG', 'ERR', 'MAG', 'MAG2', 'NKF2', 'XKF1', 'ESC', 'RPM']
     data = {msg: [] for msg in target_msgs}
 
-    msg = mlog.recv_match(type=target_msgs, blocking=False)
     count = 0
-    while msg:
-        data[msg.get_type()].append(msg.to_dict())
+    try:
         msg = mlog.recv_match(type=target_msgs, blocking=False)
-        count += 1
-        if count % 10000 == 0:
-            print(f"Processed {count} messages...")
+        while msg:
+            data[msg.get_type()].append(msg.to_dict())
+            msg = mlog.recv_match(type=target_msgs, blocking=False)
+            count += 1
+            if count % 10000 == 0:
+                print(f"Processed {count} messages...")
+    finally:
+        mlog.close()
 
     print(f"Total messages processed: {count}")
 
@@ -1012,10 +1016,12 @@ def upload_file():
             return jsonify({'error': 'No file selected'}), 400
         if not allowed_file(file.filename):
             return jsonify({'error': 'Invalid file type. Allowed: .bin, .log'}), 400
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
-        file.save(filepath)
-        print(f"File uploaded: {filepath}")
-        return jsonify(run_analysis(filepath, file.filename)), 200
+        extension = file.filename.rsplit('.', 1)[1].lower()
+        with TemporaryDirectory(prefix='log-upload-') as upload_dir:
+            filepath = os.path.join(upload_dir, f'upload.{extension}')
+            file.save(filepath)
+            print(f"File uploaded: {filepath}")
+            return jsonify(run_analysis(filepath, file.filename)), 200
     except Exception as e:
         print(f"Upload error: {e}")
         traceback.print_exc()

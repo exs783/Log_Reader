@@ -45,9 +45,15 @@ Build and start the service in the background:
 
 Open `http://localhost:18765`.
 
-Uploaded logs persist on the host in `log-dashboard/uploads`. Uploading a file
-with an existing filename replaces that file. The application does not
-automatically delete uploaded logs.
+Web uploads accept `.bin` and `.log` files with a 500 MB request limit. Each
+upload uses a separate temporary directory and a fixed filename; the original
+filename is display text only. The parser closes the log, and the temporary
+copy is deleted after analysis, including on errors. Dashboard results remain
+in browser memory until refresh, when the log must be uploaded again.
+
+Existing files and logs manually placed in `log-dashboard/uploads` still
+persist on the host and require manual removal. A forced process termination
+can leave temporary files behind; automatic cleanup after crashes is deferred.
 
 View logs with `docker compose logs -f` and stop with `docker compose down`.
 The container restarts automatically unless it is explicitly stopped.
