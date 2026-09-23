@@ -1,0 +1,12 @@
+[
+  {
+    "name": "DBVF_Quad",
+    "num_rotors": 4,
+    "base_mass_g": 0,
+    "unloaded_mass_g": 4535.924,
+    "arm_mass_g": 0,
+    "arm_extra_mass_per_in": 0,
+    "drag_cd": 1.0,
+    "max_speed_mps": 15.0
+  }
+]
