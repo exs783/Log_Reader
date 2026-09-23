@@ -1,0 +1,11 @@
+[
+    {"name": "Tattu-FunFly-1300-6S-100C", "mass_g": 225, "capacity_mah": 1300, "cost_usd": 28.89, "cells_s": 6},
+    {"name": "Tattu-RLine5-2200-6S-150C", "mass_g": 346, "capacity_mah": 2200, "cost_usd": 52.99, "cells_s": 6},
+    {"name": "Tattu-4500-6S-25C", "mass_g": 670, "capacity_mah": 4500, "cost_usd": 108.19, "cells_s": 6},
+    {"name": "GensAce-GTech-5500-6S-60C", "mass_g": 828, "capacity_mah": 5500, "cost_usd": 160.99, "cells_s": 6},
+    {"name": "Tattu-GTech-8000-6S-25C", "mass_g": 1160, "capacity_mah": 8000, "cost_usd": 161.99, "cells_s": 6},
+    {"name": "Tattu-Plus-10000-6S-25C", "mass_g": 1517, "capacity_mah": 10000, "cost_usd": 227.99, "cells_s": 6},
+    {"name": "Tattu-Plus-12000-6S-15C", "mass_g": 1670, "capacity_mah": 12000, "cost_usd": 282.99, "cells_s": 6},
+    {"name": "Tattu-GTech-22000-6S-30C", "mass_g": 2460, "capacity_mah": 22000, "cost_usd": 475.99, "cells_s": 6},
+    {"name": "Tattu-GTech-30000-6S-25C", "mass_g": 3673, "capacity_mah": 30000, "cost_usd": 532.99, "cells_s": 6}
+]

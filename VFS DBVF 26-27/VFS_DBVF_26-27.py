@@ -1,0 +1,1341 @@
+"""VFS DBVF 26-27 mission model. Fork of mission-model/Mission_Model.py with
+the VFS Design-Build-Vertical-Flight 2026-27 course in place of the
+1nm/8nm cargo course, and every motor, prop, and battery wiped -- fill
+Motors/, Propellors/, Batteries/ with real candidates before running.
+
+Success = every flight mission flown in full on one pack, inside the time
+limit: FM-1 (H -> D -> H), FM-2 (all 3 payloads S -> drop at a waypoint),
+FM-3 (retrieve all 3 payloads -> release at L), end landed at Home.
+Time limit is 600 s (RFP v1, 9/21/2026); throttle is chosen for minimum
+energy inside it. FIELD_FT comes from the official field drawing; payloads
+are 3 lb of water. Aircraft is held at 10 lb unloaded (everything but the
+water) and must stay under 25 lb loaded.
+
+Original model notes follow.
+
+VTOL mission-performance model. Python port of VTOLMissionModel1.m.
+
+Loads per-motor/prop thrust & current curves from JSON files, then for every
+vehicle type x motor/prop x battery combination computes hover time and
+simulates a fixed mission course, optimizing throttle at each takeoff and
+cruise leg.
+
+Changes vs. the MATLAB original (see inline notes at each site):
+  - hoverTime compared thrust against a hard-coded 11363 g constant instead
+    of the total_mass it had just computed -- fixed to use the real weight.
+  - takeoff/segment/landing never included the extra arm mass added for
+    props > 18in (hoverTime used 22.5 g/in, the plotting code used a
+    different 33.5 g/in) -- unified into one constant applied everywhere.
+  - segment()'s drag-area correction was applied *inside* the integration
+    loop and multiplied into itself every step, compounding without bound.
+    Computed once instead (throttle, and thus the tilt angle, is constant
+    over a phase for wingless vehicles -- see the wing note below for why
+    it can vary for winged ones).
+  - Every fixed-step Euler integration (takeoff/cruise accel/decel) for a
+    wingless vehicle is replaced with the closed-form solution of
+    dv/dt = a0 - k*v^2 (thrust vs. quadratic drag). Same physics, exact
+    instead of step-size-dependent, and O(1) per call instead of thousands
+    of loop iterations.
+  - landing() prescribes a constant descent speed and never used its
+    computed acceleration, so its stepping loop was replaced with direct
+    distance/speed kinematics (same answer, no discretization bias).
+  - Motor/prop performance curves are interpolated once directly from the
+    raw data points (PCHIP) and reused for every lookup, instead of being
+    resampled onto a 61-point grid and re-interpolated from *that* at
+    runtime (interpolating an interpolation adds avoidable error).
+  - hoverTime's required-thrust throttle is solved with root-finding
+    (brentq) against the continuous curve instead of taking the first
+    point on a discrete 1%-step grid.
+  - Rotor count, frame mass, drag, and (new) wings are pulled out of global
+    constants into a VehicleType so multiple aircraft configs can be swept
+    in one run, not just one hard-coded multirotor.
+  - Wing lift (0.5*rho*CL*S*v^2) is subtracted from the weight the rotors
+    must support during cruise. For a wingless vehicle this is always zero
+    and the fast closed-form path above still applies. For a winged one,
+    lift and thrust direction both depend on attitude, which makes the
+    transition phases velocity- and attitude-coupled and no longer
+    closed-form -- those phases, for winged vehicles only, are integrated
+    as a quaternion 6DOF rigid body in dynamics_6dof.py instead.
+  - The MATLAB course (timed laps, maximize lap count, patternsearch
+    MultiStart) is replaced by a fixed one-pass course: takeoff/100ft,
+    cruise 1nm, land, pick up cargo, takeoff, cruise 8nm, land, drop cargo,
+    takeoff, cruise 1nm, land. There's no lap-count or time-limit objective
+    for a one-pass course, so throttle is instead chosen to maximize
+    leftover battery energy. Because energy is additive across phases and
+    nothing here couples one phase's time budget to another's, maximizing
+    total leftover energy is equivalent to independently minimizing energy
+    on each of the 6 powered phases (3 takeoffs + 3 cruise legs) -- so
+    instead of one expensive joint throttle search, this does 6 cheap 1-D
+    throttle sweeps (landing throttle stays prescribed/unoptimized, as in
+    the original).
+  - VehicleType gained arm_mass_g (a flat extra structural mass, independent
+    of prop size -- distinct from arm_extra_mass_per_in, which is the
+    *additional* mass for oversized props).
+  - Cruise speed is no longer a prescribed target (the original's fixed
+    10 m/s). Each leg accelerates to the steady speed where drag balances
+    the horizontal thrust the chosen throttle actually leaves over (capped
+    at VehicleType.max_speed_mps, an airspeed governor -- the bare
+    thrust/drag balance alone comes out unrealistically high for this
+    model's small frontal areas), holds it, then coasts down -- so speed
+    is an output of the throttle, and the per-leg throttle search (minimum
+    energy) is what "fly it as efficiently as possible" now means. Decel
+    back down to the 1 m/s landing-approach floor is likewise powered
+    braking (rotors tilted the other way) instead of an unpowered drag-only
+    coast -- the coast's decay time scaled as 1/kk, so a lower-drag vehicle
+    took *longer* to finish a leg, which a braking VTOL doesn't have to.
+  - The motor-config folder, vehicle types, and batteries are all run-time
+    inputs now rather than hard-coded: pass --data-dir/--vehicle-file/
+    --battery-file, or leave them off and the script prompts for each
+    (blank vehicle/battery prompts fall back to a single built-in default
+    vehicle and battery lineup). See load_vehicle_types(),
+    load_motor_configs(), and load_batteries() for the JSON schemas.
+  - Motor configs moved from CSV (metadata packed into the filename, e.g.
+    MotorModel_PropD_MotorMass_PropMass_MotorCost_PropCost.csv) to JSON
+    (all fields named explicitly inside the object) -- same folder-of-files
+    convention as vehicle types, and no more fragile filename parsing. Its
+    loader also stopped requiring a literal >=40%-throttle data point
+    before fitting the curve: a sparse spec sheet (e.g. samples at
+    30/50/60/.../100%, no exact 40) now still interpolates 40% correctly
+    from its real neighbors, instead of erroring or ignoring that data.
+  - Both batteries and motor configs now carry cells_s (battery cell count:
+    6S/12S/24S/...). A motor's thrust/current curve is only valid at the
+    voltage it was actually measured on -- there's no validated way here to
+    extrapolate it to a different voltage -- so run() only pairs a motor
+    with a battery of the *same* cells_s, and reports how many
+    motor/battery combinations it skipped for a voltage mismatch.
+"""
+
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import glob
+import json
+import math
+import os
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+from scipy.interpolate import PchipInterpolator
+from scipy.optimize import brentq
+
+import dynamics_6dof
+
+# ---------------------------------------------------------------------------
+# Assumptions and parameters
+# ---------------------------------------------------------------------------
+
+G = 9.807  # m/s^2
+RHO_AIR = 1.225  # kg/m^3
+
+THROTTLE_MIN, THROTTLE_MAX = 40.0, 100.0
+
+# Cruise speed isn't prescribed: each leg is flown at whatever steady speed
+# the chosen throttle settles at, and the throttle search picks the setting
+# that covers the leg for the least energy. The accel phase ends this close
+# to that equilibrium (reaching it exactly takes infinite time).
+CRUISE_V_FRACTION = 0.995
+
+# Airspeed governor: real airframes don't fly at whatever speed their thrust
+# happens to equilibrate at (that number comes out triple digits for this
+# model's small frontal areas -- unrealistic). 18 m/s (~35 kt) is a
+# reasonable cruise cap for a heavy-lift cargo VTOL in this weight class;
+# override per-airframe via VehicleType.max_speed_mps if a given design is
+# rated faster or slower.
+DEFAULT_MAX_SPEED_MPS = 18.0
+
+FT_TO_M = 0.3048
+
+TARGET_TAKEOFF_ALTITUDE_M = 30 * FT_TO_M  # FM-1/2/3 all fly transits at >= 30 ft AGL
+
+LANDING_START_ALT_M = TARGET_TAKEOFF_ALTITUDE_M
+LANDING_PHASE1_ALT_M = 3.048  # 10 ft
+LANDING_PHASE1_SPEED_MPS = 5.0
+LANDING_PHASE2_SPEED_MPS = 1.0
+
+NAUTICAL_MILE_M = 1852.0
+DEFAULT_PAYLOAD_LB = 3.0  # each DBVF payload: >= 3 lb of water; container counts toward aircraft weight
+LB_TO_G = 453.59237
+
+# Aim points in feet from the 26-27 field drawing, Home at the origin, +x
+# toward the flight line. Zones lie on one line D - L - S. Given: S and L
+# are 50 ft wide, 50 ft apart; 150 ft from the A/B/C column to L; A and C
+# 10 ft either side of B; zones ~75 ft deep. Scaled off the picture
+# (estimates): the payload pickup spot is ~20 ft below H in S, the A/B/C
+# column sits ~10 ft inside D's edge, and D is ~85 ft wide, so FM-1 aims
+# for D's center.
+FIELD_FT = {
+    "H": (0.0, 0.0),
+    "S": (0.0, -20.0),
+    "L": (-100.0, 0.0),
+    "A": (-285.0, 10.0),
+    "B": (-285.0, 0.0),
+    "C": (-285.0, -10.0),
+    "D": (-317.0, 0.0),
+}
+# Where each of the 3 FM-2 payloads gets dropped (one per waypoint).
+PAYLOAD_DROP_WAYPOINTS = ["A", "B", "C"]
+DROP_HOVER_S = 5.0  # hold over the waypoint at >= 30 ft to release -- estimate
+MISSION_TIME_LIMIT_S = 600.0  # 10 min per attempt; timer is paused from the FM-2 landing until FM-3 liftoff
+MAX_LOADED_LB = 25.0  # aircraft + attachments + payload must weigh below this at all times
+
+
+def payload_fraction_multiplier(unloaded_lb: float) -> float:
+    """R from RFP Table 4, on weight without the water."""
+    for limit, r in ((10, 1.5), (12, 1.4), (14, 1.3), (16, 1.2), (18, 1.1), (20, 1.05)):
+        if unloaded_lb < limit:
+            return r
+    return 1.0
+
+
+def _dist_m(a: str, b: str) -> float:
+    (xa, ya), (xb, yb) = FIELD_FT[a], FIELD_FT[b]
+    return math.hypot(xb - xa, yb - ya) * FT_TO_M
+
+
+def build_mission_legs(drops: list[str] = PAYLOAD_DROP_WAYPOINTS) -> list[tuple[str, float | None]]:
+    """Full-success DBVF course as (kind, value) legs: value is metres for
+    cruise, seconds for hover, None otherwise. Picking up/releasing
+    in ground contact is a land + takeoff; the FM-2 drop is a hover at 30 ft."""
+    legs = [
+        # FM-1: H -> D, land, back to H, land
+        ("takeoff", None), ("cruise", _dist_m("H", "D")), ("land", None),
+        ("takeoff", None), ("cruise", _dist_m("D", "H")), ("land", None),
+        # FM-2: shuttle each payload S -> waypoint, then home
+        ("takeoff", None),
+    ]
+    here = "H"
+    for wp in drops:
+        legs += [("cruise", _dist_m(here, "S")), ("land", None), ("add_payload", None),
+                 ("takeoff", None), ("cruise", _dist_m("S", wp)),
+                 ("hover", DROP_HOVER_S), ("remove_payload", None)]
+        here = wp
+    legs += [("cruise", _dist_m(here, "H")), ("land", None),
+             # FM-3: retrieve each payload and release it in L (re-arm is off the clock)
+             ("takeoff", None)]
+    here = "H"
+    for wp in drops:
+        legs += [("cruise", _dist_m(here, wp)), ("land", None), ("add_payload", None),
+                 ("takeoff", None), ("cruise", _dist_m(wp, "L")), ("land", None),
+                 ("remove_payload", None), ("takeoff", None)]
+        here = "L"
+    # Conclusion: land at Home
+    legs += [("cruise", _dist_m(here, "H")), ("land", None)]
+    return legs
+
+
+MISSION_LEGS = build_mission_legs()
+
+# A configuration that physically cannot take off / cruise forward is
+# penalized with a large time/energy sentinel, so it naturally comes out
+# infeasible rather than crashing the optimizer.
+INFEASIBLE_TIME_S = 9999.0
+INFEASIBLE_ENERGY_MAH = 1_000_000.0  # mission legs are now nautical miles, not meters -- old 1000 sentinel could look like a real number
+
+@dataclass
+class Battery:
+    name: str
+    mass_g: float
+    capacity_mah: float
+    cost_usd: float
+    cells_s: int  # cell count (6S/12S/24S/...) -- a motor's thrust/current curve is only
+    # valid at the voltage it was measured on, so a motor is only paired with a battery
+    # of that same cells_s, or with several of a *lower* cells_s wired in series to reach
+    # it (see series_stack_battery() and run()); this model doesn't extrapolate curve
+    # performance across voltages, since doing that accurately needs a validated KV/
+    # voltage scaling law this project doesn't have data to back -- stacking packs changes
+    # the electrical supply, not the motor's own measured curve, so it stays valid.
+    # Checked against literature: a naive affinity-law voltage rescaling (thrust~V^2,
+    # power~V^3) of a raw measured curve is not well-validated -- real tools that do
+    # extrapolate across voltage (eCalc propCalc, ArduPilot DriveCalculator) use a full
+    # motor equivalent-circuit model (KV, winding resistance, no-load current) plus
+    # voltage-independent propeller Ct/Cp coefficients, not a rescaled curve, and that
+    # needs calibration data (at least two voltage points, or Rm/Io) this project
+    # doesn't have -- so refusing to extrapolate is the technically correct call given
+    # what data exists, not overly conservative.
+
+
+def series_stack_battery(battery: Battery, k: int) -> Battery:
+    """k copies of `battery` wired in series: voltage (cells_s) multiplies by k,
+    capacity stays the same (series adds volts, not amp-hours), mass/cost scale
+    linearly with the extra packs. This is the manual "12Sx2 -> 24S" pattern
+    battery lineups have used by hand -- generalized so run() can synthesize it
+    for any battery/motor voltage gap that's an integer multiple, instead of
+    requiring a hand-authored pack for every voltage a motor happens to need."""
+    return dataclasses.replace(
+        battery,
+        name=f"{battery.name}_x{k}S",
+        mass_g=battery.mass_g * k,
+        cost_usd=battery.cost_usd * k,
+        cells_s=battery.cells_s * k,
+    )
+
+
+# Wiped for DBVF 26-27 -- load real packs with --battery-file.
+BATTERIES: list[Battery] = []
+
+BATTERY_FIELDS = {f.name for f in dataclasses.fields(Battery)}
+BATTERY_REQUIRED_FIELDS = {"name", "mass_g", "capacity_mah", "cost_usd", "cells_s"}
+
+
+def load_batteries(path: str) -> list[Battery]:
+    """Load batteries from a JSON file, or a folder of them (each holding a
+    list of battery objects) -- same convention as load_vehicle_types() and
+    load_motor_configs(). All fields are required, e.g.:
+        [{"name": "22Ah-12S", "mass_g": 3100, "capacity_mah": 22000,
+          "cost_usd": 610, "cells_s": 12}]
+    """
+    if os.path.isdir(path):
+        file_paths = sorted(glob.glob(os.path.join(path, "*.json")))
+        if not file_paths:
+            raise FileNotFoundError(f"No .json files found in {path}")
+    else:
+        file_paths = [path]
+
+    batteries = []
+    for file_path in file_paths:
+        with open(file_path) as f:
+            raw = json.load(f)
+        if not isinstance(raw, list) or not raw:
+            raise ValueError(f"{file_path}: expected a non-empty JSON list of battery objects")
+        for i, entry in enumerate(raw):
+            missing = BATTERY_REQUIRED_FIELDS - entry.keys()
+            if missing:
+                raise ValueError(f"{file_path}: entry {i} is missing required field(s) {sorted(missing)}")
+            unknown = entry.keys() - BATTERY_FIELDS
+            if unknown:
+                raise ValueError(f"{file_path}: entry {i} has unknown field(s) {sorted(unknown)}")
+            batteries.append(Battery(**entry))
+    return batteries
+
+
+# ---------------------------------------------------------------------------
+# Vehicle types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class VehicleType:
+    name: str
+    num_rotors: int
+    base_mass_g: float  # frame + electronics + payload mounting; no battery/motors/cargo
+    # > 0 pins the whole unloaded aircraft (frame + motors + props + battery) at this
+    # mass: run() sets base_mass_g to whatever is left after each motor/battery combo.
+    unloaded_mass_g: float = 0.0
+    arm_mass_g: float = 0.0  # flat extra structural mass for the arms, independent of prop size
+    arm_diameter_threshold_in: float = 18.0
+    # *additional* arm mass per inch of prop diameter beyond the threshold. Not traceable to a citable
+    # source (practitioner/hand-tuned knowledge) -- literature on multirotor scaling laws suggests structural
+    # mass should grow *faster* than linear with prop size (bigger props need proportionally stiffer, not
+    # just proportionally heavier, arms), so this linear-beyond-threshold model is a defensible simplification
+    # of that reality, but the specific slope has no external backing either way.
+    arm_extra_mass_per_in: float = 22.5
+    # Frontal-area-referenced drag coefficient for the open multirotor frame
+    # (arms, motors, legs -- a bluff, non-streamlined shape). Checked against
+    # literature: a hobbyist racing-frame estimate (Flite Test, "Aerodynamics
+    # in Racing Multirotors") puts Cd~1 for a bare racing quad frame; general
+    # bluff-body/open-lattice references (flat plate ~1.17-2.0, open lattice/
+    # cyclist ~0.9-1.2) support a higher value for a bulkier, motor-nacelle-
+    # and-leg-laden cargo frame. 1.28 is upper-middle of that ~1.0-1.3 band --
+    # reasonable, not a documented number for this specific vehicle class.
+    drag_cd: float = 1.28
+    wing_area_m2: float = 0.0  # 0 = no wings
+    wing_cl: float = 0.0  # lift coefficient at cruise attitude; ignored if wing_area_m2 is 0
+    max_speed_mps: float = DEFAULT_MAX_SPEED_MPS  # airspeed governor -- see constant's comment
+    # Zero-lift ("parasite") drag coefficient, referenced to wing_area_m2 --
+    # the standard fixed-wing-aircraft convention (unlike drag_cd, which is
+    # referenced to the prop/frame frontal area -- see parasite_drag_area_m2()
+    # for how the two get combined). Covers the wing's own skin-friction and
+    # form drag at cruise attitude, which the frontal-area model has no other
+    # way to represent (that model's "effective area" only grows with tilt,
+    # so a winged vehicle flying near-level at cruise -- most of its weight
+    # supported by wing lift, not thrust -- got essentially the bare prop
+    # frontal area and nothing for the wing itself). 0.045 is mid-range for
+    # a light, somewhat-draggy UAV airframe (clean sailplanes run ~0.02,
+    # draggy UAVs with exposed motor pods/struts run ~0.06); checked against
+    # literature (clean light-GA aircraft run ~0.016-0.034, per Raymer/
+    # Gudmundsson-style drag-buildup conventions) and found reasonable, not
+    # clearly low or high, for an unfaired small cargo VTOL; ignored when
+    # wing_area_m2 is 0.
+    parasite_cd0: float = 0.045
+    # -- Tailsitter transition dynamics (dynamics_6dof.py) -- all optional;
+    # 0.0/None means "estimate from what's already here," matching this
+    # model's other geometry defaults. Only read when wing_area_m2 > 0
+    # (has_wing) -- a wingless vehicle never touches these.
+    wing_span_m: float = 0.0  # 0 -> estimate as sqrt(6 * wing_area_m2), AR=6 assumed
+    body_length_m: float = 0.0  # 0 -> estimate as 2 prop diameters
+    inertia_kg_m2: tuple[float, float, float] | None = None  # (Ixx, Iyy, Izz); None -> geometric estimate
+    max_control_torque_n_m: tuple[float, float, float] | None = None  # (roll, pitch, yaw) N*m; None -> geometric estimate
+    attitude_kp: float = 4.0  # transition attitude-control proportional gain
+    attitude_kd: float = 2.0  # transition attitude-control derivative gain
+
+
+# Reproduces the original MATLAB model's single hard-coded airframe.
+MULTIROTOR = VehicleType(
+    name="Multirotor-6",
+    num_rotors=6,
+    base_mass_g=3000.0 + 700.0 + 800.0,  # frame+arms, electronics, payload mounting
+)
+
+# Add more VehicleType(...) instances here to sweep additional airframes
+# (e.g. a winged hybrid: VehicleType(..., wing_area_m2=1.2, wing_cl=0.9)).
+VEHICLE_TYPES = [MULTIROTOR]
+
+VEHICLE_TYPE_FIELDS = {f.name for f in dataclasses.fields(VehicleType)}
+VEHICLE_TYPE_REQUIRED_FIELDS = {"name", "num_rotors", "base_mass_g"}
+
+
+def load_vehicle_types(path: str) -> list[VehicleType]:
+    """Load vehicle types from a JSON file, or a folder of them (each file
+    holding a list of vehicle objects) -- matching the motor-CSV folder
+    convention. Each vehicle object has VehicleType's fields, e.g.
+        [
+          {"name": "Multirotor-6", "num_rotors": 6, "base_mass_g": 4500},
+          {"name": "Hybrid-VTOL", "num_rotors": 4, "base_mass_g": 5200,
+           "wing_area_m2": 1.2, "wing_cl": 0.9}
+        ]
+    Only name/num_rotors/base_mass_g are required; everything else falls
+    back to VehicleType's defaults (wingless, standard drag/arm constants).
+    """
+    if os.path.isdir(path):
+        file_paths = sorted(glob.glob(os.path.join(path, "*.json")))
+        if not file_paths:
+            raise FileNotFoundError(f"No .json files found in {path}")
+    else:
+        file_paths = [path]
+
+    vehicles = []
+    for file_path in file_paths:
+        with open(file_path) as f:
+            raw = json.load(f)
+        if not isinstance(raw, list) or not raw:
+            raise ValueError(f"{file_path}: expected a non-empty JSON list of vehicle type objects")
+        for i, entry in enumerate(raw):
+            missing = VEHICLE_TYPE_REQUIRED_FIELDS - entry.keys()
+            if missing:
+                raise ValueError(f"{file_path}: entry {i} is missing required field(s) {sorted(missing)}")
+            unknown = entry.keys() - VEHICLE_TYPE_FIELDS
+            if unknown:
+                raise ValueError(f"{file_path}: entry {i} has unknown field(s) {sorted(unknown)}")
+            vehicles.append(VehicleType(**entry))
+    return vehicles
+
+
+# ---------------------------------------------------------------------------
+# Motor/prop performance data
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MotorPropConfig:
+    motor_model: str
+    prop_diameter_in: float
+    motor_mass_g: float
+    prop_mass_g: float
+    motor_cost: float
+    prop_cost: float
+    cells_s: int  # battery cell count (6S/12S/24S/...) the thrust/current curve below was measured at
+    thrust_of: PchipInterpolator  # throttle% -> single-motor thrust, g
+    amps_of: PchipInterpolator  # throttle% -> single-motor current, A
+    # Lowest throttle the curve was actually measured at (never above 40). A
+    # light airframe on a strong motor hovers below 40%, and clamping it to
+    # 40% there would bill it 40%-throttle current it never draws -- so a
+    # sheet that goes lower (KDE's start at 25%) is used down to where it ends.
+    throttle_floor: float = THROTTLE_MIN
+
+    def thrust_g(self, throttle_pct: float) -> float:
+        t = min(max(throttle_pct, self.throttle_floor), THROTTLE_MAX)
+        return float(self.thrust_of(t))
+
+    def amps_a(self, throttle_pct: float) -> float:
+        t = min(max(throttle_pct, self.throttle_floor), THROTTLE_MAX)
+        return float(self.amps_of(t))
+
+
+MOTOR_CONFIG_PHYSICS_FIELDS = {
+    "prop_diameter_in", "motor_mass_g", "prop_mass_g", "cells_s",
+    "throttle_pct", "thrust_g", "current_a",
+}
+MOTOR_CONFIG_COST_FIELDS = {"motor_cost", "prop_cost"}  # informational only, don't affect physics -- optional
+MOTOR_CONFIG_FIELDS = MOTOR_CONFIG_PHYSICS_FIELDS | MOTOR_CONFIG_COST_FIELDS | {"motor_model"}
+
+
+def load_motor_configs(path: str) -> list[MotorPropConfig]:
+    """Load motor/prop configs from a JSON file (a single object or a list
+    of objects), or a folder of such files -- same convention as
+    load_vehicle_types(). All metadata lives in the object itself rather
+    than being packed into the filename, e.g.:
+        [
+          {
+            "motor_model": "M50C35_PRO_EEE_34kv",   # optional, defaults to the filename
+            "prop_diameter_in": 20, "motor_mass_g": 450, "prop_mass_g": 60,
+            "motor_cost": 120, "prop_cost": 25, "cells_s": 12,
+            "throttle_pct": [30, 50, 60, 70, 80, 90, 100],
+            "thrust_g": [13360, 35262, 49381, 63961, 80002, 96733, 113654],
+            "current_a": [10.63, 42, 68.22, 102.19, 147.52, 203.99, 251.48]
+          }
+        ]
+    throttle_pct/thrust_g/current_a must be equal-length parallel arrays
+    with at least 2 points spanning [40, 100]% throttle; motor_cost/
+    prop_cost are optional (default 0, since they're informational only --
+    they don't feed the physics). cells_s is the battery cell count
+    (6S/12S/24S/...) the curve was measured at -- run() only pairs this
+    motor with a battery of that same cells_s, since thrust and current at
+    a given throttle % genuinely depend on supply voltage and this model
+    doesn't extrapolate a curve across voltages.
+
+    An entry missing a physics-required field (or with it null), with a
+    non-numeric throttle/thrust/current value, or with too few throttle
+    points to span [40, 100]% is skipped rather than failing the whole
+    load -- real-world spec sheets are often partial (e.g. "peak thrust
+    only, no full sweep published"). Skipped entries and unrecognized
+    fields are printed so you know what's still missing.
+    """
+    if os.path.isdir(path):
+        file_paths = sorted(glob.glob(os.path.join(path, "*.json")))
+        if not file_paths:
+            raise FileNotFoundError(f"No .json files found in {path}")
+    else:
+        file_paths = [path]
+
+    configs = []
+    skipped = []
+    for file_path in file_paths:
+        with open(file_path) as f:
+            raw = json.load(f)
+        if isinstance(raw, dict):
+            raw = [raw]
+        if not isinstance(raw, list) or not raw:
+            raise ValueError(f"{file_path}: expected a JSON object, or a non-empty JSON list of them")
+        default_name = os.path.splitext(os.path.basename(file_path))[0]
+
+        for i, entry in enumerate(raw):
+            label = f"{file_path}#{i} ({entry.get('motor_model', default_name)})"
+
+            missing = sorted(f for f in MOTOR_CONFIG_PHYSICS_FIELDS if entry.get(f) is None)
+            if missing:
+                skipped.append((label, f"missing/null required field(s): {missing}"))
+                continue
+            unknown = entry.keys() - MOTOR_CONFIG_FIELDS
+            if unknown:
+                print(f"Note: {label}: ignoring unrecognized field(s) {sorted(unknown)}")
+
+            try:
+                throttle = np.array(entry["throttle_pct"], dtype=float)
+                current = np.array(entry["current_a"], dtype=float)
+                thrust = np.array(entry["thrust_g"], dtype=float)
+            except (TypeError, ValueError):
+                skipped.append((label, "throttle_pct/thrust_g/current_a contains a non-numeric value"))
+                continue
+            if np.isnan(throttle).any() or np.isnan(current).any() or np.isnan(thrust).any():
+                skipped.append((label, "throttle_pct/thrust_g/current_a contains a null value"))
+                continue
+            if not (len(throttle) == len(current) == len(thrust)):
+                skipped.append((label, "throttle_pct/thrust_g/current_a must be the same length"))
+                continue
+            if throttle.size < 2:
+                skipped.append((label, "need at least 2 throttle/thrust/current points (only an endpoint given)"))
+                continue
+            if throttle.min() > THROTTLE_MIN or throttle.max() < THROTTLE_MAX:
+                skipped.append((label, f"throttle data covers [{throttle.min():.1f}, {throttle.max():.1f}]%, "
+                                        f"needs to span [{THROTTLE_MIN}, {THROTTLE_MAX}]%"))
+                continue
+            # Fit on the *full* raw range (not just points >= 40) so a sparse
+            # spec sheet with no sample exactly at 40 -- e.g. 30/50/60/...100
+            # -- still interpolates 40 correctly from its real neighbors,
+            # rather than requiring an exact boundary sample or extrapolating.
+            # thrust_g()/amps_a() clamp queries to [40, 100] at lookup time,
+            # so points outside that band only ever inform the curve's shape.
+
+            throttle, unique_idx = np.unique(throttle, return_index=True)
+            current, thrust = current[unique_idx], thrust[unique_idx]
+
+            configs.append(
+                MotorPropConfig(
+                    motor_model=entry.get("motor_model", default_name),
+                    prop_diameter_in=float(entry["prop_diameter_in"]),
+                    motor_mass_g=float(entry["motor_mass_g"]),
+                    prop_mass_g=float(entry["prop_mass_g"]),
+                    motor_cost=float(entry.get("motor_cost") or 0.0),
+                    prop_cost=float(entry.get("prop_cost") or 0.0),
+                    cells_s=int(entry["cells_s"]),
+                    thrust_of=PchipInterpolator(throttle, thrust),
+                    amps_of=PchipInterpolator(throttle, current),
+                    throttle_floor=float(throttle.min()),
+                )
+            )
+
+    if skipped:
+        plural = "y" if len(skipped) == 1 else "ies"
+        print(f"Skipped {len(skipped)} motor config entr{plural} (incomplete data):")
+        for label, reason in skipped:
+            print(f"  {label}: {reason}")
+    if not configs:
+        raise FileNotFoundError(f"No usable motor configs found in {path} (see skip reasons above)")
+    return configs
+
+
+# ---------------------------------------------------------------------------
+# Shared physics helpers
+# ---------------------------------------------------------------------------
+
+def airframe_mass_g(vehicle: VehicleType, cfg: MotorPropConfig) -> float:
+    """Structure only: frame/arms/electronics/payload mounting -- everything
+    in total_mass_g() except the propulsion system and payload."""
+    mass = vehicle.base_mass_g + vehicle.arm_mass_g
+    if cfg.prop_diameter_in > vehicle.arm_diameter_threshold_in:
+        mass += (cfg.prop_diameter_in - vehicle.arm_diameter_threshold_in) * vehicle.arm_extra_mass_per_in
+    return mass
+
+
+def propulsion_mass_g(vehicle: VehicleType, cfg: MotorPropConfig, battery_mass_g: float) -> float:
+    """Motors + props (one set per rotor) + battery."""
+    return battery_mass_g + vehicle.num_rotors * (cfg.motor_mass_g + cfg.prop_mass_g)
+
+
+def total_mass_g(vehicle: VehicleType, cfg: MotorPropConfig, battery_mass_g: float,
+                  extra_payload_g: float = 0.0) -> float:
+    return (airframe_mass_g(vehicle, cfg) + propulsion_mass_g(vehicle, cfg, battery_mass_g)
+            + extra_payload_g)
+
+
+def frontal_area_m2(vehicle: VehicleType, cfg: MotorPropConfig) -> float:
+    return (cfg.prop_diameter_in * vehicle.num_rotors + 12 * 12) / 1550.0  # in^2 -> m^2
+
+
+def rotor_set_thrust_n(vehicle: VehicleType, cfg: MotorPropConfig, throttle_pct: float) -> float:
+    return cfg.thrust_g(throttle_pct) / 1000.0 * G * vehicle.num_rotors
+
+
+def rotor_set_amps_ma(vehicle: VehicleType, cfg: MotorPropConfig, throttle_pct: float) -> float:
+    return cfg.amps_a(throttle_pct) * vehicle.num_rotors * 1000.0
+
+
+def wing_lift_n(vehicle: VehicleType, velocity_mps: float) -> float:
+    if vehicle.wing_area_m2 <= 0:
+        return 0.0
+    return 0.5 * RHO_AIR * vehicle.wing_cl * vehicle.wing_area_m2 * velocity_mps * velocity_mps
+
+
+def parasite_drag_area_m2(vehicle: VehicleType) -> float:
+    """The wing's zero-lift drag (parasite_cd0 * wing_area_m2, the real
+    physical parasite drag force at a given v) re-expressed as an
+    *equivalent area at vehicle.drag_cd* -- dividing by drag_cd converts it
+    into the same units _effective_area_at()'s tilt-inflated frontal area is
+    already in, so the two can just be added together and multiplied by the
+    one shared drag_cd everywhere that already happens (kk = 0.5*rho*cd*
+    area/mass, in several places). Zero whenever wing_area_m2 is 0."""
+    return vehicle.parasite_cd0 * vehicle.wing_area_m2 / vehicle.drag_cd
+
+
+def _resolved_body_length_m(vehicle: VehicleType, cfg: MotorPropConfig) -> float:
+    """vehicle.body_length_m if set, else a crude nose-to-tail estimate (2
+    prop diameters) -- good enough for dynamics_6dof.py's coarse
+    inertia/torque estimates. See VehicleType.body_length_m."""
+    if vehicle.body_length_m > 0.0:
+        return vehicle.body_length_m
+    return 2.0 * cfg.prop_diameter_in * 0.0254
+
+
+def _resolved_wing_span_m(vehicle: VehicleType) -> float:
+    """vehicle.wing_span_m if set, else sqrt(6 * wing_area_m2) (AR=6
+    assumed). See VehicleType.wing_span_m."""
+    if vehicle.wing_span_m > 0.0:
+        return vehicle.wing_span_m
+    if vehicle.wing_area_m2 <= 0.0:
+        return 0.0
+    return math.sqrt(6.0 * vehicle.wing_area_m2)
+
+
+def _effective_area_at(thrust_n: float, weight_n: float, base_area_m2: float, lift_fn, v: float,
+                        parasite_area_m2: float = 0.0) -> float:
+    """Frontal area inflated by the forward tilt needed to support
+    (weight - wing lift) at this velocity, i.e. how much of total thrust
+    magnitude is left over to push horizontally -- plus a fixed parasite-drag
+    area (see parasite_drag_area_m2()) that doesn't scale with tilt the way
+    the prop/frame frontal area does, since it's the wing's own drag, not
+    the rotors'."""
+    effective_weight_n = max(weight_n - lift_fn(v), 0.0)
+    thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - effective_weight_n * effective_weight_n, 0.0))
+    tilt_area = base_area_m2 * (thrust_n / thrust_horizontal_n) if thrust_horizontal_n > 0 else base_area_m2
+    return tilt_area + parasite_area_m2
+
+
+def _equilibrium_velocity(thrust_n: float, weight_n: float, base_area_m2: float, cd: float, lift_fn,
+                           parasite_area_m2: float = 0.0) -> float:
+    """Steady forward speed a throttle setting settles at: drag equals the
+    horizontal thrust left over after supporting (weight - wing lift).
+    Returns 0.0 if the vehicle can't hold itself up and push at all."""
+    def excess_thrust(v: float) -> float:
+        area = _effective_area_at(thrust_n, weight_n, base_area_m2, lift_fn, v, parasite_area_m2)
+        effective_weight_n = max(weight_n - lift_fn(v), 0.0)
+        thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - effective_weight_n * effective_weight_n, 0.0))
+        return thrust_horizontal_n - 0.5 * RHO_AIR * cd * area * v * v
+
+    if excess_thrust(0.0) <= 0:
+        return 0.0
+    # At v_hi, drag on the *un*-inflated, no-parasite area alone already
+    # exceeds full thrust, and the real drag area (tilt-inflated, plus any
+    # parasite term) is only ever >= that while thrust_horizontal is <=
+    # thrust_n -- so excess is negative there for any lift_fn/parasite_area.
+    # (The 1.05 is what makes it strictly negative rather than exactly zero
+    # in the fully-winged, zero-parasite case, where lift carries all the
+    # weight and the area isn't inflated at all.)
+    v_hi = 1.05 * math.sqrt(2 * thrust_n / (RHO_AIR * cd * base_area_m2))
+    return brentq(excess_thrust, 0.0, v_hi)
+
+
+def _log_cosh(x: float) -> float:
+    """log(cosh(x)) without the overflow cosh(x) itself hits once |x| passes
+    ~710 -- log1p(exp(-2|x|)) stays in [0, log 2] for every x, so this is
+    exact and safe everywhere cosh(x) is finite or not."""
+    ax = abs(x)
+    return ax - math.log(2.0) + math.log1p(math.exp(-2.0 * ax))
+
+
+def _accel_phase_closed_form(a0: float, kk: float, v0: float, v_target: float, distance_cap: float):
+    """Closed-form solve of dv/dt = a0 - kk*v^2 (constant thrust vs.
+    quadratic drag), stopping at whichever comes first: v reaching
+    v_target, or distance reaching distance_cap. Returns (time_s,
+    distance_m, v_final)."""
+    if a0 <= 0:
+        return None
+    if kk <= 0:
+        t = min((v_target - v0) / a0 if v_target > v0 else math.inf,
+                 (-v0 + math.sqrt(v0 * v0 + 2 * a0 * distance_cap)) / a0)
+        v = v0 + a0 * t
+        x = v0 * t + 0.5 * a0 * t * t
+        return t, x, v
+
+    v_t = math.sqrt(a0 / kk)
+    c0 = math.atanh(min(v0 / v_t, 0.999999))
+
+    candidates = []
+    if v_target < v_t:
+        u_target = math.atanh(v_target / v_t)
+        candidates.append((u_target - c0) / (kk * v_t))
+    # acosh(cosh(c0) * exp(kk*distance_cap)) overflows exp() long before u_d
+    # itself would be too big to represent (u_d grows only linearly in
+    # kk*distance_cap, since acosh compresses it back down) -- e.g. an
+    # overweight/underpowered vehicle whose terminal velocity never reaches
+    # v_target still needs a finite, ordinary-sized u_d here. Do the
+    # acosh(cosh(c0)*exp(y)) step in log-space instead so the intermediate
+    # never overflows: for y large, acosh(exp(y)) -> y + ln(2).
+    ln_y = _log_cosh(c0) + kk * distance_cap
+    u_d = ln_y + math.log(2.0) if ln_y > 300 else math.acosh(math.exp(ln_y))
+    candidates.append((u_d - c0) / (kk * v_t))
+    t = min(candidates)
+
+    u = kk * v_t * t + c0
+    v = v_t * math.tanh(u)
+    x = (_log_cosh(u) - _log_cosh(c0)) / kk
+    return t, x, v
+
+
+def _decel_phase(kk: float, v0: float, v_floor: float, distance_cap: float):
+    """Closed-form solve of dv/dt = -kk*v^2 (drag only, thrust off), stopping
+    at v reaching v_floor or distance reaching distance_cap. Unaffected by
+    wings: this model only ever treats decel as an unpowered coast, so
+    weight-support and thus tilt isn't in play (see segment() for how the
+    coast-phase drag area is picked)."""
+    if kk <= 0 or v0 <= v_floor:
+        return 0.0, 0.0, v0
+    t_v = (v0 / v_floor - 1) / (kk * v0)
+    # Unlike the accel case above, t_d itself (not just an intermediate) is
+    # genuinely astronomically large when kk*distance_cap is big -- coasting
+    # drag decay is hyperbolic, so covering a "large" kk*distance_cap this
+    # way takes truly exponential time. That's beyond float64 range; math.inf
+    # is the correct closest representation, and min() below still picks the
+    # (ordinary-sized) t_v whenever it's the real constraint.
+    try:
+        t_d = (math.exp(kk * distance_cap) - 1) / (kk * v0)
+    except OverflowError:
+        t_d = math.inf
+    t = min(t_v, t_d)
+    v = v0 / (1 + kk * v0 * t)
+    x = math.log(1 + kk * v0 * t) / kk
+    return t, x, v
+
+
+def _decel_phase_powered(a0: float, kk: float, v0: float, v_floor: float, distance_cap: float):
+    """Closed-form solve of dv/dt = -(a0 + kk*v^2): braking thrust plus drag,
+    both decelerating (mirror of the accel phase's a0 - kk*v^2, thrust now
+    pointed the other way). Stops at v reaching v_floor or distance reaching
+    distance_cap.
+
+    Replaces flying the decel leg as a pure unpowered coast (_decel_phase
+    above): a VTOL can brake with its rotors, and coasting on drag alone had
+    no floor on how long the tail takes -- both the time and distance to
+    reach v_floor scale as 1/kk, so a LOWER-drag vehicle took LONGER to
+    finish a leg, backwards for a model whose whole point is now "as
+    efficient as possible". a0 here comes from the same thrust magnitude
+    used to reach cruise speed, tilted the other way, so a wingless vehicle
+    decelerates exactly as fast as it accelerated."""
+    if v0 <= v_floor:
+        return 0.0, 0.0, v0
+    if a0 <= 0:
+        return _decel_phase(kk, v0, v_floor, distance_cap)  # no braking thrust available -- fall back to coasting
+
+    if kk <= 0:
+        x_floor = (v0 * v0 - v_floor * v_floor) / (2 * a0)
+        if x_floor <= distance_cap:
+            return (v0 - v_floor) / a0, x_floor, v_floor
+        v = math.sqrt(v0 * v0 - 2 * a0 * distance_cap)
+        return (v0 - v) / a0, distance_cap, v
+
+    b = math.sqrt(a0 / kk)
+    x_floor = math.log((a0 + kk * v0 * v0) / (a0 + kk * v_floor * v_floor)) / (2 * kk)
+    if x_floor <= distance_cap:
+        t_floor = (math.atan(v0 / b) - math.atan(v_floor / b)) / (kk * b)
+        return t_floor, x_floor, v_floor
+
+    v = math.sqrt(max((a0 + kk * v0 * v0) * math.exp(-2 * kk * distance_cap) - a0, 0.0) / kk)
+    t = (math.atan(v0 / b) - math.atan(v / b)) / (kk * b)
+    return t, distance_cap, v
+
+
+# ---------------------------------------------------------------------------
+# Hover time
+# ---------------------------------------------------------------------------
+
+def _hover_throttle(vehicle: VehicleType, cfg: MotorPropConfig, mass_g: float) -> float | None:
+    """Throttle where rotor thrust equals weight; None if full throttle can't."""
+    thrust_needed_per_motor_g = mass_g / vehicle.num_rotors
+    if thrust_needed_per_motor_g > cfg.thrust_g(THROTTLE_MAX):
+        return None
+    f = lambda th: cfg.thrust_g(th) - thrust_needed_per_motor_g
+    if f(cfg.throttle_floor) >= 0:
+        return cfg.throttle_floor
+    return brentq(f, cfg.throttle_floor, THROTTLE_MAX)
+
+
+def hover(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery, duration_s: float,
+          extra_payload_g: float = 0.0):
+    """Hold position (e.g. the FM-2 payload drop at 30 ft) for duration_s."""
+    th = _hover_throttle(vehicle, cfg, total_mass_g(vehicle, cfg, battery.mass_g, extra_payload_g))
+    if th is None:
+        return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+    return duration_s, rotor_set_amps_ma(vehicle, cfg, th) * (duration_s / 3600.0)
+
+
+def hover_time_min(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery) -> float:
+    throttle_hover = _hover_throttle(vehicle, cfg, total_mass_g(vehicle, cfg, battery.mass_g))
+    if throttle_hover is None:
+        return 0.0  # can't hover even at full throttle
+
+    current_a = cfg.amps_a(throttle_hover)
+    battery_capacity_ah = battery.capacity_mah / 1000.0
+    return 60.0 * battery_capacity_ah / (current_a * vehicle.num_rotors)
+
+
+# ---------------------------------------------------------------------------
+# Flight phases
+# ---------------------------------------------------------------------------
+
+def takeoff(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery,
+            throttle_pct: float, extra_payload_g: float = 0.0):
+    """Vertical climb only -- wings don't generate lift at zero airspeed, so
+    they're irrelevant here regardless of vehicle type."""
+    mass_g = total_mass_g(vehicle, cfg, battery.mass_g, extra_payload_g)
+    mass_kg = mass_g / 1000.0
+    weight_n = mass_kg * G
+    thrust_n = rotor_set_thrust_n(vehicle, cfg, throttle_pct)
+    if thrust_n <= weight_n:
+        return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+
+    amps_ma = rotor_set_amps_ma(vehicle, cfg, throttle_pct)
+    kk = 0.5 * RHO_AIR * vehicle.drag_cd * frontal_area_m2(vehicle, cfg) / mass_kg
+    a0 = (thrust_n - weight_n) / mass_kg
+
+    t, _x, _v = _accel_phase_closed_form(a0, kk, v0=1.0, v_target=math.inf, distance_cap=TARGET_TAKEOFF_ALTITUDE_M)
+    return t, amps_ma * (t / 3600.0)
+
+
+def segment(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery,
+            throttle_pct: float, distance_m: float, extra_payload_g: float = 0.0):
+    mass_g = total_mass_g(vehicle, cfg, battery.mass_g, extra_payload_g)
+    mass_kg = mass_g / 1000.0
+    weight_n = mass_kg * G
+    thrust_n = rotor_set_thrust_n(vehicle, cfg, throttle_pct)
+    amps_ma = rotor_set_amps_ma(vehicle, cfg, throttle_pct)
+    base_area = frontal_area_m2(vehicle, cfg)
+    has_wing = vehicle.wing_area_m2 > 0
+    lift_fn = (lambda v: wing_lift_n(vehicle, v)) if has_wing else (lambda _v: 0.0)
+    parasite_area = parasite_drag_area_m2(vehicle)  # 0.0 for a wingless vehicle
+
+    v_eq = _equilibrium_velocity(thrust_n, weight_n, base_area, vehicle.drag_cd, lift_fn, parasite_area)
+    if v_eq <= 1.0:  # can't out-accelerate its own drag past the 1 m/s start
+        return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+    # Governed: capped at max_speed_mps even if drag alone would equilibrate
+    # higher (real aircraft don't fly at whatever a bare thrust/drag balance
+    # says -- there's a structural/control-authority/regulatory speed limit).
+    v_target = min(CRUISE_V_FRACTION * v_eq, vehicle.max_speed_mps)
+
+    if has_wing:
+        # Tailsitter transition: real quaternion 6DOF attitude integration
+        # instead of the tilt-area trick (see dynamics_6dof.py and
+        # docs/superpowers/specs/2026-09-15-quaternion-6dof-transition-design.md).
+        body_length_m = _resolved_body_length_m(vehicle, cfg)
+        wing_span_m = _resolved_wing_span_m(vehicle)
+        inertia_kg_m2 = vehicle.inertia_kg_m2 or dynamics_6dof.estimate_inertia_kg_m2(
+            mass_kg, body_length_m, wing_span_m)
+        thrust_min_n = cfg.thrust_g(THROTTLE_MIN) / 1000.0 * G
+        thrust_max_n = cfg.thrust_g(THROTTLE_MAX) / 1000.0 * G
+        max_torque_n_m = vehicle.max_control_torque_n_m or dynamics_6dof.estimate_max_torque_n_m(
+            thrust_min_n, thrust_max_n, body_length_m, wing_span_m)
+
+        accel = dynamics_6dof.transition_accel(
+            mass_kg=mass_kg, weight_n=weight_n, thrust_n=thrust_n, drag_cd=vehicle.drag_cd,
+            base_area_m2=base_area, lift_fn=lift_fn, parasite_area_m2=parasite_area,
+            inertia_kg_m2=inertia_kg_m2, max_torque_n_m=max_torque_n_m,
+            kp=vehicle.attitude_kp, kd=vehicle.attitude_kd,
+            v0=1.0, v_target=v_target, distance_cap=distance_m / 2)
+        if accel is None:
+            return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+        t_acc, x_acc, v_cruise = accel
+
+        decel = dynamics_6dof.transition_decel(
+            mass_kg=mass_kg, weight_n=weight_n, thrust_n=thrust_n, drag_cd=vehicle.drag_cd,
+            base_area_m2=base_area, lift_fn=lift_fn, parasite_area_m2=parasite_area,
+            inertia_kg_m2=inertia_kg_m2, max_torque_n_m=max_torque_n_m,
+            kp=vehicle.attitude_kp, kd=vehicle.attitude_kd,
+            v0=v_cruise, v_floor=1.0, distance_cap=distance_m / 2)
+        if decel is None:
+            return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+        t_dec, x_dec, _v_end = decel
+    else:
+        # Wingless multirotor: unchanged closed-form path.
+        thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - weight_n * weight_n, 0.0))
+        if thrust_horizontal_n <= 0:
+            return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+        effective_area = base_area * (thrust_n / thrust_horizontal_n)
+        kk = 0.5 * RHO_AIR * vehicle.drag_cd * effective_area / mass_kg
+        a0 = thrust_horizontal_n / mass_kg
+        accel = _accel_phase_closed_form(a0, kk, v0=1.0, v_target=v_target, distance_cap=distance_m / 2)
+        if accel is None:
+            return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+        t_acc, x_acc, v_cruise = accel
+
+        decel_area = _effective_area_at(thrust_n, weight_n, base_area, lift_fn, v_cruise, parasite_area)
+        kk_decel = 0.5 * RHO_AIR * vehicle.drag_cd * decel_area / mass_kg
+        effective_weight_cruise_n = max(weight_n - lift_fn(v_cruise), 0.0)
+        thrust_horizontal_decel_n = math.sqrt(
+            max(thrust_n * thrust_n - effective_weight_cruise_n * effective_weight_cruise_n, 0.0))
+        a0_decel = thrust_horizontal_decel_n / mass_kg
+        t_dec, x_dec, _v_end = _decel_phase_powered(a0_decel, kk_decel, v_cruise, v_floor=1.0,
+                                                      distance_cap=distance_m / 2)
+
+    # Energy uses the cruise-throttle current for both phases, matching the
+    # original's assumption that throttle (and so current draw) is held
+    # constant rather than reduced while braking down.
+    energy_mah = amps_ma * ((t_acc + t_dec) / 3600.0)
+
+    if x_acc + x_dec >= distance_m:
+        return t_acc + t_dec, energy_mah
+
+    t_cruise = (distance_m - (x_acc + x_dec)) / v_cruise
+    energy_mah += amps_ma * (t_cruise / 3600.0)
+    return t_acc + t_dec + t_cruise, energy_mah
+
+
+def landing(vehicle: VehicleType, cfg: MotorPropConfig):
+    """Both phases hold a prescribed constant descent speed, so time/energy
+    are direct kinematics -- no integration loop needed. Mass/payload isn't
+    a parameter here: the original's descent was likewise prescribed at a
+    fixed speed regardless of mass (its computed acceleration was dead
+    code, never fed back into the descent rate)."""
+    amps40_ma = rotor_set_amps_ma(vehicle, cfg, THROTTLE_MIN)
+    linear_amps_ma = lambda throttle_pct: amps40_ma * (throttle_pct / THROTTLE_MIN)
+
+    t1 = (LANDING_START_ALT_M - LANDING_PHASE1_ALT_M) / LANDING_PHASE1_SPEED_MPS
+    energy1_mah = linear_amps_ma(30.0) * (t1 / 3600.0)
+
+    t2 = LANDING_PHASE1_ALT_M / LANDING_PHASE2_SPEED_MPS
+    energy2_mah = linear_amps_ma(20.0) * (t2 / 3600.0)
+
+    return t1 + t2, energy1_mah + energy2_mah
+
+
+# ---------------------------------------------------------------------------
+# Mission: fixed one-pass course
+# ---------------------------------------------------------------------------
+
+def mission(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery,
+            takeoff_throttles: list[float], cruise_throttles: list[float], payload_mass_g: float):
+    """Simulate the fixed course given a throttle for each takeoff (in
+    order) and each cruise leg (in order). Returns (total_time_s,
+    total_energy_mah, feasible)."""
+    payload_g = 0.0
+    total_time = total_energy = 0.0
+    infeasible = False
+    to_i = cr_i = 0
+    for kind, value in MISSION_LEGS:
+        if kind == "takeoff":
+            t, e = takeoff(vehicle, cfg, battery, takeoff_throttles[to_i], extra_payload_g=payload_g)
+            to_i += 1
+        elif kind == "land":
+            t, e = landing(vehicle, cfg)
+        elif kind == "hover":
+            t, e = hover(vehicle, cfg, battery, value, extra_payload_g=payload_g)
+        elif kind == "cruise":
+            t, e = segment(vehicle, cfg, battery, cruise_throttles[cr_i], value, extra_payload_g=payload_g)
+            cr_i += 1
+        elif kind == "add_payload":
+            payload_g += payload_mass_g
+            continue
+        else:  # remove_payload
+            payload_g -= payload_mass_g
+            continue
+        if e >= INFEASIBLE_ENERGY_MAH:
+            infeasible = True
+        total_time += t
+        total_energy += e
+
+    # Feasibility is checked against the battery's rated capacity_mah flat, regardless of
+    # discharge rate. Checked against literature: Peukert's law (capacity derating at high
+    # discharge current) is a lead-acid phenomenon that barely applies to Li-ion/LiPo at
+    # drone-relevant C-rates (Peukert exponents for Li-ion are close to 1, i.e. rate-
+    # independent, per Chen et al., "A Critical Review of Using the Peukert Equation... for
+    # Lithium-Ion Cells," J. Electrochem. Soc. 2020) -- so this flat-capacity model is fine
+    # on that count. The real unmodeled effect is different: terminal-voltage sag under load
+    # (V_drop = I * internal_resistance) can trip a fixed-voltage cutoff before the rated mAh
+    # is drawn, leaving perhaps 10-30% of rated capacity unusable at high C-rate or on an
+    # aged/high-resistance pack (hobbyist-sourced estimate, not a controlled study -- treat
+    # as an order-of-magnitude caveat). Modeling that properly needs per-pack internal-
+    # resistance data this project doesn't have; not fixed here.
+    feasible = (not infeasible) and total_energy <= battery.capacity_mah \
+        and total_time <= MISSION_TIME_LIMIT_S
+    return total_time, total_energy, feasible
+
+
+def _min_energy_throttle(phase_fn, grid_step: float, time_weight: float = 0.0,
+                         throttle_lo: float = THROTTLE_MIN):
+    """Grid-search throttle in [throttle_lo, 100] for the value minimizing this
+    single phase's energy + time_weight * time (mAh per second -- 0 means
+    pure minimum energy)."""
+    best = None
+    for th in np.arange(throttle_lo, THROTTLE_MAX + 1e-9, grid_step):
+        t, e = phase_fn(th)
+        if e >= INFEASIBLE_ENERGY_MAH:
+            continue
+        if best is None or e + time_weight * t < best[2] + time_weight * best[1]:
+            best = (th, t, e)
+    if best is None:
+        return THROTTLE_MAX, INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+    return best
+
+
+def mission_best(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery,
+                  payload_mass_g: float, grid_step: float = 0.5) -> dict:
+    """Minimum-energy plan that still lands inside MISSION_TIME_LIMIT_S. If
+    the pure minimum-energy plan runs long, bisect a time weight (mAh
+    charged per second of flight) up until the plan fits: the cheapest way
+    to buy back each second, phase by phase."""
+    plan = _mission_plan(vehicle, cfg, battery, payload_mass_g, grid_step, 0.0)
+    if plan["total_time_s"] <= MISSION_TIME_LIMIT_S:
+        return plan
+    lo, hi = 0.0, 1.0
+    fast = _mission_plan(vehicle, cfg, battery, payload_mass_g, grid_step, hi)
+    while fast["total_time_s"] > MISSION_TIME_LIMIT_S and hi < 1e4:
+        lo, hi = hi, hi * 4
+        fast = _mission_plan(vehicle, cfg, battery, payload_mass_g, grid_step, hi)
+    if fast["total_time_s"] > MISSION_TIME_LIMIT_S:
+        return fast  # can't make the limit at any throttle -- reported infeasible
+    for _ in range(20):
+        mid = 0.5 * (lo + hi)
+        trial = _mission_plan(vehicle, cfg, battery, payload_mass_g, grid_step, mid)
+        if trial["total_time_s"] <= MISSION_TIME_LIMIT_S:
+            hi, fast = mid, trial
+        else:
+            lo = mid
+    return fast
+
+
+def _mission_plan(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery,
+                  payload_mass_g: float, grid_step: float, time_weight: float) -> dict:
+    """Independently optimize each takeoff's and each cruise leg's throttle
+    for minimum energy. The mission has no time limit and energy is
+    additive across phases, so this is equivalent to (and much cheaper
+    than) a joint search maximizing total leftover battery energy. Landing
+    throttle stays prescribed/unoptimized, as in the original."""
+    payload_g = 0.0
+    total_time = total_energy = 0.0
+    infeasible = False
+    throttles = []
+    for kind, value in MISSION_LEGS:
+        if kind == "takeoff":
+            th, t, e = _min_energy_throttle(
+                lambda x, p=payload_g: takeoff(vehicle, cfg, battery, x, extra_payload_g=p), grid_step,
+                time_weight, cfg.throttle_floor)
+            throttles.append(("takeoff", th))
+        elif kind == "land":
+            t, e = landing(vehicle, cfg)
+        elif kind == "hover":
+            t, e = hover(vehicle, cfg, battery, value, extra_payload_g=payload_g)
+        elif kind == "cruise":
+            th, t, e = _min_energy_throttle(
+                lambda x, p=payload_g, d=value: segment(vehicle, cfg, battery, x, d, extra_payload_g=p),
+                grid_step, time_weight, cfg.throttle_floor)
+            throttles.append(("cruise", th))
+        elif kind == "add_payload":
+            payload_g += payload_mass_g
+            continue
+        else:  # remove_payload
+            payload_g -= payload_mass_g
+            continue
+        if e >= INFEASIBLE_ENERGY_MAH:
+            infeasible = True
+        total_time += t
+        total_energy += e
+
+    feasible = (not infeasible) and total_energy <= battery.capacity_mah \
+        and total_time <= MISSION_TIME_LIMIT_S
+    return {
+        "feasible": feasible,
+        "total_time_s": total_time,
+        "total_energy_mah": total_energy,
+        "energy_remaining_mah": battery.capacity_mah - total_energy,
+        "throttles": throttles,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Driver
+# ---------------------------------------------------------------------------
+
+def run(data_dir: str, payload_lb: float = DEFAULT_PAYLOAD_LB, grid_step: float = 0.5,
+        vehicle_types: list[VehicleType] | None = None,
+        batteries: list[Battery] | None = None) -> pd.DataFrame:
+    vehicle_types = vehicle_types or VEHICLE_TYPES
+    batteries = batteries or BATTERIES
+    payload_mass_g = payload_lb * LB_TO_G
+    configs = load_motor_configs(data_dir)
+
+    rows = []
+    skipped_voltage_mismatch = skipped_over_budget = 0
+    for base_vehicle in vehicle_types:
+        for cfg in configs:
+            # A motor's thrust/current curve was measured at one specific
+            # voltage; pair it with a battery of that same cell count, or
+            # auto series-stack several of a lower-cells_s battery to reach
+            # it (see series_stack_battery()) -- stacking only goes up, since
+            # splitting a pack down to a lower voltage needs a regulator this
+            # model doesn't have.
+            compatible_batteries = []
+            for b in batteries:
+                if b.cells_s == cfg.cells_s:
+                    compatible_batteries.append(b)
+                elif cfg.cells_s > b.cells_s and cfg.cells_s % b.cells_s == 0:
+                    compatible_batteries.append(series_stack_battery(b, cfg.cells_s // b.cells_s))
+            skipped_voltage_mismatch += len(batteries) - len(compatible_batteries)
+            for battery in compatible_batteries:
+                vehicle = base_vehicle
+                if vehicle.unloaded_mass_g > 0:
+                    frame_g = vehicle.unloaded_mass_g - propulsion_mass_g(vehicle, cfg, battery.mass_g) \
+                        - (airframe_mass_g(vehicle, cfg) - vehicle.base_mass_g)
+                    if frame_g <= 0:  # motors + battery alone blow the weight budget
+                        skipped_over_budget += 1
+                        continue
+                    vehicle = dataclasses.replace(vehicle, base_mass_g=frame_g)
+                airframe_g = airframe_mass_g(vehicle, cfg)
+                propulsion_g = propulsion_mass_g(vehicle, cfg, battery.mass_g)
+                mass_g = airframe_g + propulsion_g
+                result = mission_best(vehicle, cfg, battery, payload_mass_g, grid_step)
+
+                row = {
+                    "vehicle": vehicle.name,
+                    "motor_model": cfg.motor_model,
+                    "prop_diameter_in": cfg.prop_diameter_in,
+                    "battery": battery.name,
+                    "battery_capacity_mah": battery.capacity_mah,
+                    "cells_s": cfg.cells_s,
+                    "total_mass_g": mass_g,
+                    "airframe_mass_g": airframe_g,
+                    "propulsion_mass_g": propulsion_g,
+                    "total_cost_usd": cfg.motor_cost * 7 + cfg.prop_cost * 6 + battery.cost_usd * 2,
+                    "hover_time_min": hover_time_min(vehicle, cfg, battery),
+                    "loaded_mass_g": mass_g + payload_mass_g,
+                    "payload_fraction_R": payload_fraction_multiplier(mass_g / LB_TO_G),
+                    "mission_feasible": result["feasible"] and mass_g + payload_mass_g < MAX_LOADED_LB * LB_TO_G,
+                    "mission_within_time_limit": result["total_time_s"] <= MISSION_TIME_LIMIT_S,
+                    "mission_total_time_s": result["total_time_s"],
+                    "mission_total_energy_mah": result["total_energy_mah"],
+                    "mission_energy_remaining_mah": result["energy_remaining_mah"],
+                }
+                takeoff_n = cruise_n = 0
+                for kind, th in result["throttles"]:
+                    if kind == "takeoff":
+                        takeoff_n += 1
+                        row[f"throttle_takeoff{takeoff_n}"] = th
+                    else:
+                        cruise_n += 1
+                        row[f"throttle_cruise{cruise_n}"] = th
+                rows.append(row)
+
+    if skipped_over_budget:
+        print(f"Skipped {skipped_over_budget} motor/battery combo(s) heavier than the vehicle's unloaded_mass_g.")
+    if skipped_voltage_mismatch:
+        print(f"Skipped {skipped_voltage_mismatch} motor/battery pairing(s) with mismatched cells_s "
+              f"(a motor's curve is only valid at the voltage it was measured on).")
+    return pd.DataFrame(rows)
+
+
+GOOD_COLOR, CRITICAL_COLOR, SERIES_COLOR = "#0ca30c", "#d03b3b", "#2a78d6"
+
+
+def plot_results(df: pd.DataFrame, out_prefix: str | None):
+    """One dot/bar per config would need a 250+-entry legend to identify --
+    unreadable. Instead: rank vehicle types by their best setup (bar charts,
+    one series, no legend needed) and show the full trade space colored only
+    by feasible/infeasible (2 categories, not one per config)."""
+    import matplotlib.pyplot as plt
+
+    def _bar_by_vehicle(ax, values, title, ylabel, colors=SERIES_COLOR):
+        ax.bar(values.index, values.values, color=colors)
+        ax.set_title(title)
+        ax.set_ylabel(ylabel)
+        ax.tick_params(axis="x", rotation=45)
+        for label in ax.get_xticklabels():
+            label.set_ha("right")
+
+    fig1, ax1 = plt.subplots(figsize=(9, 5))
+    best_hover = df.loc[df.groupby("vehicle")["hover_time_min"].idxmax()] \
+        .set_index("vehicle")["hover_time_min"].sort_values(ascending=False)
+    _bar_by_vehicle(ax1, best_hover, "Best Hover Time by Vehicle Type", "Hover Time (minutes)")
+    fig1.tight_layout()
+
+    fig2, ax2 = plt.subplots(figsize=(9, 5))
+    best_idx = df[df.mission_feasible].groupby("vehicle")["mission_energy_remaining_mah"].idxmax()
+    infeasible_vehicles = set(df.vehicle) - set(df.loc[best_idx, "vehicle"])
+    if infeasible_vehicles:
+        fallback_idx = df[df.vehicle.isin(infeasible_vehicles)].groupby("vehicle")["mission_energy_remaining_mah"].idxmax()
+        best_idx = pd.concat([best_idx, fallback_idx])
+    best_energy = df.loc[best_idx].set_index("vehicle")["mission_energy_remaining_mah"].sort_values(ascending=False)
+    colors = [GOOD_COLOR if v not in infeasible_vehicles else CRITICAL_COLOR for v in best_energy.index]
+    _bar_by_vehicle(ax2, best_energy,
+                     "Best Mission Energy Margin by Vehicle Type\n(green = feasible, red = no feasible setup found)",
+                     "Energy Remaining (mAh)", colors=colors)
+    ax2.axhline(0, color="#898781", linewidth=0.8)
+    fig2.tight_layout()
+
+    import plotly.graph_objects as go
+
+    # Each view is (title, x-column-expr, y-column-expr, z-column-expr, axis titles).
+    # Buttons restyle x/y/z on the existing traces instead of rebuilding the figure.
+    views = [
+        ("Mass / Energy / Hover", lambda d: d.total_mass_g / 1000.0, lambda d: d.mission_total_energy_mah,
+         lambda d: d.hover_time_min, "Total Mass (kg)", "Mission Energy (mAh)", "Hover Time (minutes)"),
+        ("Mass / Hover / Cost", lambda d: d.total_mass_g / 1000.0, lambda d: d.hover_time_min,
+         lambda d: d.total_cost_usd, "Total Mass (kg)", "Hover Time (minutes)", "Total Cost (USD)"),
+        ("Energy / Hover / Cost", lambda d: d.mission_total_energy_mah, lambda d: d.hover_time_min,
+         lambda d: d.total_cost_usd, "Mission Energy (mAh)", "Hover Time (minutes)", "Total Cost (USD)"),
+    ]
+    splits = [(True, GOOD_COLOR, "Feasible"), (False, CRITICAL_COLOR, "Infeasible")]
+    subs = [df[df.mission_feasible == feasible] for feasible, _, _ in splits]
+
+    fig3 = go.Figure()
+    for sub, (_, color, label) in zip(subs, splits):
+        title, xf, yf, zf, *_ = views[0]
+        fig3.add_trace(go.Scatter3d(
+            x=xf(sub), y=yf(sub), z=zf(sub),
+            mode="markers", name=label,
+            marker=dict(size=4, color=color, opacity=0.7),
+            customdata=sub[["vehicle", "motor_model", "battery"]].values,
+            hovertemplate="%{customdata[0]}<br>%{customdata[1]} / %{customdata[2]}"
+                          "<br>x=%{x:.2f}  y=%{y:.2f}  z=%{z:.2f}<extra></extra>",
+        ))
+
+    buttons = []
+    for title, xf, yf, zf, xlabel, ylabel, zlabel in views:
+        buttons.append(dict(
+            label=title, method="update",
+            args=[
+                {"x": [xf(sub) for sub in subs], "y": [yf(sub) for sub in subs], "z": [zf(sub) for sub in subs]},
+                {"title": f"{title} (all {len(df)} configurations)",
+                 "scene.xaxis.title": xlabel, "scene.yaxis.title": ylabel, "scene.zaxis.title": zlabel},
+            ],
+        ))
+    fig3.update_layout(
+        title=f"{views[0][0]} (all {len(df)} configurations)",
+        scene=dict(xaxis_title=views[0][4], yaxis_title=views[0][5], zaxis_title=views[0][6]),
+        updatemenus=[dict(buttons=buttons, active=0, x=0.02, y=1.08, xanchor="left", showactive=True)],
+    )
+
+    if out_prefix:
+        fig1.savefig(f"{out_prefix}_best_hover_by_vehicle.png", bbox_inches="tight", dpi=150)
+        fig2.savefig(f"{out_prefix}_best_energy_margin_by_vehicle.png", bbox_inches="tight", dpi=150)
+        # include_plotlyjs="cdn" instead of the default True: the default inlines
+        # the whole ~4.5MB plotly.js bundle into the file, dwarfing the actual
+        # data (a few hundred KB for thousands of rows). Loading it from a CDN
+        # instead needs network access to view the file, but drops it to a
+        # fraction of the size.
+        fig3.write_html(f"{out_prefix}_hover_vs_mass_tradespace.html", include_plotlyjs="cdn")
+    else:
+        plt.show()
+        fig3.show()
+
+
+def _prompt(message: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    entered = input(f"{message}{suffix}: ").strip()
+    return entered or default
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--data-dir", default=None,
+                         help="JSON file, or folder of JSON files, of motor/prop configs "
+                              "(see load_motor_configs()). If omitted, you'll be prompted for it.")
+    parser.add_argument("--vehicle-file", default=None,
+                         help="JSON file, or folder of JSON files, of vehicle type configs "
+                              "(see load_vehicle_types()). If omitted, you'll be prompted for it; "
+                              "leave that prompt blank to use the single built-in default vehicle.")
+    parser.add_argument("--battery-file", default=None,
+                         help="JSON file, or folder of JSON files, of battery configs "
+                              "(see load_batteries()). If omitted, you'll be prompted for it; "
+                              "required -- the built-in lineup is empty.")
+    parser.add_argument("--payload-lb", type=float, default=DEFAULT_PAYLOAD_LB,
+                         help="Mass of each DBVF payload, in lb")
+    parser.add_argument("--grid-step", type=float, default=0.5,
+                         help="Throttle grid resolution in %% for per-phase optimization")
+    parser.add_argument("--out-csv", default="vfs_dbvf_26-27_results.csv")
+    parser.add_argument("--plot-prefix", default=None,
+                         help="Save plots as <prefix>_*.png instead of showing them interactively")
+    parser.add_argument("--no-plot", action="store_true")
+    args = parser.parse_args()
+
+    data_dir = args.data_dir or _prompt("Path to a motor config JSON file or folder")
+    if not data_dir:
+        parser.error("--data-dir (or a non-blank answer at the prompt) is required")
+
+    vehicle_file = args.vehicle_file
+    if vehicle_file is None:
+        vehicle_file = _prompt("Path to a vehicle types JSON file or folder (blank = built-in default vehicle)")
+    vehicle_types = load_vehicle_types(vehicle_file) if vehicle_file else VEHICLE_TYPES
+
+    battery_file = args.battery_file
+    if battery_file is None:
+        battery_file = _prompt("Path to a battery configs JSON file or folder (blank = built-in default batteries)")
+    batteries = load_batteries(battery_file) if battery_file else BATTERIES
+    if not batteries:
+        parser.error("no batteries: the DBVF lineup was wiped -- add packs to Batteries/ and pass that folder")
+
+    df = run(data_dir, args.payload_lb, args.grid_step, vehicle_types, batteries)
+    df.to_csv(args.out_csv, index=False)
+    print(df.to_string(index=True))
+    print(f"\nWrote {args.out_csv}")
+
+    ok = df[df.mission_feasible]
+    if ok.empty:
+        print("\nNo motor/battery combination flies the full DBVF mission.")
+    else:
+        print("\nSmallest battery that flies the full DBVF mission, per vehicle/motor:")
+        best = ok.loc[ok.groupby(["vehicle", "motor_model"])["battery_capacity_mah"].idxmin()]
+        print(best[["vehicle", "motor_model", "battery", "total_mass_g", "mission_total_time_s",
+                    "mission_energy_remaining_mah"]].to_string(index=False))
+
+    if not args.no_plot:
+        plot_results(df, args.plot_prefix)
+
+
+if __name__ == "__main__":
+    main()
