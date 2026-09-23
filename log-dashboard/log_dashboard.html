@@ -301,7 +301,13 @@
         .customplot-vars-card {
             flex: 0 0 280px;
             max-height: 640px;
+            display: flex;
+            flex-direction: column;
+        }
+        .customplot-vars-scroll {
+            flex: 1 1 auto;
             overflow-y: auto;
+            min-height: 0;
         }
         .customplot-plot-card {
             flex: 1;
@@ -662,7 +668,9 @@
             <div class="customplot-layout">
                 <div class="card customplot-vars-card">
                     <h3>Variables</h3>
-                    <div id="customplot-vars" style="display:flex; flex-direction:column; gap:14px;"></div>
+                    <div class="customplot-vars-scroll">
+                        <div id="customplot-vars" style="display:flex; flex-direction:column; gap:14px;"></div>
+                    </div>
                     <button class="file-input-label" style="border:none; margin-top:16px;" onclick="generateCustomPlot()">Plot Selected</button>
                 </div>
                 <div class="card customplot-plot-card">
@@ -677,7 +685,7 @@
     <footer>&copy; 2026 &mdash; Pixhawk Log Analyzer &mdash; Drone Flight Intelligence</footer>
 
     <script>
-        const API_URL = 'http://localhost:5001/api';
+        const API_URL = 'https://vtollogs.williserdman.com/api';
         let currentData = null;
         let currentSummary = null;
 
@@ -794,6 +802,15 @@
                 hideAlert('global-alert');
 
                 // Show overview
+                document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+                document.querySelectorAll('.nav-btn').forEach(btn => {
+                    btn.classList.remove('active');
+                    btn.setAttribute('aria-selected', 'false');
+                });
+                document.getElementById('overview').classList.add('active');
+                const overviewTab = document.getElementById('tab-overview');
+                overviewTab.classList.add('active');
+                overviewTab.setAttribute('aria-selected', 'true');
                 showOverviewPage();
             } catch (error) {
                 // A failed upload must not leave the previous flight's data on screen

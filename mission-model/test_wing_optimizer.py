@@ -162,18 +162,20 @@ for expr in (tip_eqs["upper_x_of_t"], tip_eqs["upper_y_of_t"], tip_eqs["lower_x_
     assert "\"chord\"" not in expr
 
 # bending_relief_factor: a rectangular wing (taper_ratio=1) must get exactly
-# 1.0 -- today's mass model, unchanged -- derived from the root bending-
-# moment integral of a chord-proportional load: BM(lambda) ~ 1/2 - (1-lambda)/3,
-# normalized so BM(1) = 1.0.
+# 1.0. Correct formula (root chord must grow as taper drops to hold area/span
+# fixed -- see the function's docstring, and MIT 16.01 Unified Engineering's
+# "Wing Bending Calculations" for the cited cross-check):
+# 2*(1+2*lambda) / (3*(1+lambda)) -- 1.0 at lambda=1, 2/3 (not 1/3) at
+# lambda=0.
 assert math.isclose(bending_relief_factor("linear", 1.0), 1.0, rel_tol=1e-12)
-assert math.isclose(bending_relief_factor("linear", 0.5), 2.0 / 3.0, rel_tol=1e-9)
-assert math.isclose(bending_relief_factor("linear", 0.0), 1.0 / 3.0, rel_tol=1e-9)
-# Elliptical loading's own bending-moment integral (BM ~ 1/3 vs rectangle's
-# 1/2) gives exactly 2/3 -- independent of any taper_ratio argument, and not
-# coincidentally close to the linear taper_ratio~0.5 industry rule of thumb
-# for approximating an elliptical load distribution.
-assert math.isclose(bending_relief_factor("elliptical", taper_ratio=1.0), 2.0 / 3.0, rel_tol=1e-12)
-assert math.isclose(bending_relief_factor("elliptical", taper_ratio=0.2), 2.0 / 3.0, rel_tol=1e-12)
+assert math.isclose(bending_relief_factor("linear", 0.5), 8.0 / 9.0, rel_tol=1e-9)
+assert math.isclose(bending_relief_factor("linear", 0.0), 2.0 / 3.0, rel_tol=1e-9)
+# Elliptical loading's own bending-moment integral, by the same area/span-
+# fixed accounting, gives exactly 8/(3*pi) (~0.849) -- independent of any
+# taper_ratio argument, and noticeably *less* relief than the linear
+# formula's taper_ratio~0.5 value (8/9 ~ 0.889).
+assert math.isclose(bending_relief_factor("elliptical", taper_ratio=1.0), 8.0 / (3.0 * math.pi), rel_tol=1e-12)
+assert math.isclose(bending_relief_factor("elliptical", taper_ratio=0.2), 8.0 / (3.0 * math.pi), rel_tol=1e-12)
 try:
     bending_relief_factor("triangular", 1.0)
     raise AssertionError("unknown planform should be rejected")
@@ -214,7 +216,7 @@ assert math.isclose(mid_chord, 4.0 * math.sqrt(1 - 0.6**2), rel_tol=1e-12)
 
 # optimize_wing: elliptical planform. root_chord_m/span_m must satisfy the
 # ellipse-area identity, tip_chord_m must be 0, and the mass must carry the
-# elliptical bending_relief_factor (2/3) rather than the linear-taper one.
+# elliptical bending_relief_factor (8/(3*pi)) rather than the linear-taper one.
 ell = optimize_wing(lift_mass_kg=12.0, cruise_mps=25.0, cl=0.6, min_ar=4.0, max_ar=10.0,
                      max_span_m=None, areal_density_g_m2=1500.0, ar_mass_exponent=0.5, planform="elliptical")
 assert math.isclose(ell["wing_area_m2"], rect["wing_area_m2"], rel_tol=1e-9), "planform must not change required area"

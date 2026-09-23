@@ -176,6 +176,14 @@ class Battery:
     # performance across voltages, since doing that accurately needs a validated KV/
     # voltage scaling law this project doesn't have data to back -- stacking packs changes
     # the electrical supply, not the motor's own measured curve, so it stays valid.
+    # Checked against literature: a naive affinity-law voltage rescaling (thrust~V^2,
+    # power~V^3) of a raw measured curve is not well-validated -- real tools that do
+    # extrapolate across voltage (eCalc propCalc, ArduPilot DriveCalculator) use a full
+    # motor equivalent-circuit model (KV, winding resistance, no-load current) plus
+    # voltage-independent propeller Ct/Cp coefficients, not a rescaled curve, and that
+    # needs calibration data (at least two voltage points, or Rm/Io) this project
+    # doesn't have -- so refusing to extrapolate is the technically correct call given
+    # what data exists, not overly conservative.
 
 
 def series_stack_battery(battery: Battery, k: int) -> Battery:
@@ -253,7 +261,20 @@ class VehicleType:
     base_mass_g: float  # frame + electronics + payload mounting; no battery/motors/cargo
     arm_mass_g: float = 0.0  # flat extra structural mass for the arms, independent of prop size
     arm_diameter_threshold_in: float = 18.0
-    arm_extra_mass_per_in: float = 22.5  # *additional* arm mass per inch of prop diameter beyond the threshold
+    # *additional* arm mass per inch of prop diameter beyond the threshold. Not traceable to a citable
+    # source (practitioner/hand-tuned knowledge) -- literature on multirotor scaling laws suggests structural
+    # mass should grow *faster* than linear with prop size (bigger props need proportionally stiffer, not
+    # just proportionally heavier, arms), so this linear-beyond-threshold model is a defensible simplification
+    # of that reality, but the specific slope has no external backing either way.
+    arm_extra_mass_per_in: float = 22.5
+    # Frontal-area-referenced drag coefficient for the open multirotor frame
+    # (arms, motors, legs -- a bluff, non-streamlined shape). Checked against
+    # literature: a hobbyist racing-frame estimate (Flite Test, "Aerodynamics
+    # in Racing Multirotors") puts Cd~1 for a bare racing quad frame; general
+    # bluff-body/open-lattice references (flat plate ~1.17-2.0, open lattice/
+    # cyclist ~0.9-1.2) support a higher value for a bulkier, motor-nacelle-
+    # and-leg-laden cargo frame. 1.28 is upper-middle of that ~1.0-1.3 band --
+    # reasonable, not a documented number for this specific vehicle class.
     drag_cd: float = 1.28
     wing_area_m2: float = 0.0  # 0 = no wings
     wing_cl: float = 0.0  # lift coefficient at cruise attitude; ignored if wing_area_m2 is 0
@@ -268,7 +289,10 @@ class VehicleType:
     # supported by wing lift, not thrust -- got essentially the bare prop
     # frontal area and nothing for the wing itself). 0.045 is mid-range for
     # a light, somewhat-draggy UAV airframe (clean sailplanes run ~0.02,
-    # draggy UAVs with exposed motor pods/struts run ~0.06); ignored when
+    # draggy UAVs with exposed motor pods/struts run ~0.06); checked against
+    # literature (clean light-GA aircraft run ~0.016-0.034, per Raymer/
+    # Gudmundsson-style drag-buildup conventions) and found reasonable, not
+    # clearly low or high, for an unfaired small cargo VTOL; ignored when
     # wing_area_m2 is 0.
     parasite_cd0: float = 0.045
     # -- Tailsitter transition dynamics (dynamics_6dof.py) -- all optional;
@@ -882,6 +906,18 @@ def mission(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery,
         total_time += t
         total_energy += e
 
+    # Feasibility is checked against the battery's rated capacity_mah flat, regardless of
+    # discharge rate. Checked against literature: Peukert's law (capacity derating at high
+    # discharge current) is a lead-acid phenomenon that barely applies to Li-ion/LiPo at
+    # drone-relevant C-rates (Peukert exponents for Li-ion are close to 1, i.e. rate-
+    # independent, per Chen et al., "A Critical Review of Using the Peukert Equation... for
+    # Lithium-Ion Cells," J. Electrochem. Soc. 2020) -- so this flat-capacity model is fine
+    # on that count. The real unmodeled effect is different: terminal-voltage sag under load
+    # (V_drop = I * internal_resistance) can trip a fixed-voltage cutoff before the rated mAh
+    # is drawn, leaving perhaps 10-30% of rated capacity unusable at high C-rate or on an
+    # aged/high-resistance pack (hobbyist-sourced estimate, not a controlled study -- treat
+    # as an order-of-magnitude caveat). Modeling that properly needs per-pack internal-
+    # resistance data this project doesn't have; not fixed here.
     feasible = (not infeasible) and total_energy <= battery.capacity_mah
     return total_time, total_energy, feasible
 

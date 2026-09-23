@@ -88,21 +88,37 @@ HOVER_QUAT = np.array([1.0, 0.0, 0.0, 0.0])
 CRUISE_QUAT = quat_from_axis_angle(np.array([0.0, 1.0, 0.0]), math.pi / 2)
 
 
+# Roskam non-dimensional radii-of-gyration (Rx=kx/b, Ry=ky/l) for light
+# single-engine aircraft (Roskam, "Airplane Flight Dynamics and Automatic
+# Flight Controls" -- values found for both low-wing, Rx~0.248/Ry~0.338, and
+# high-wing/C182-type, Rx~0.242/Ry~0.397, configurations; averaged/rounded
+# here since this project has no CAD to pick a specific configuration from).
+# Izz uses the same Ry-scale coefficient applied to the mean of span/length,
+# not a separately-tabulated Rz, to keep izz = ixx + iyy (both axes'
+# distributions resist yaw) -- a simplification vs. Roskam's own distinct Rz
+# row, kept for consistency with this function's existing izz convention.
+ROSKAM_RX = 0.25  # roll, applied to wing_span_m
+ROSKAM_RY = 0.35  # pitch, applied to body_length_m
+
+
 def estimate_inertia_kg_m2(mass_kg: float, body_length_m: float, wing_span_m: float) -> tuple[float, float, float]:
-    """ponytail: coarse geometric placeholder -- mass split 50/50 between a
-    fuselage rod along body x (length body_length_m) and a wing rod along
-    body y (length wing_span_m), each I=(1/12)*m*L^2. Wrong by some constant
-    factor for any real airframe. Upgrade path: set
-    VehicleType.inertia_kg_m2 once CAD gives real principal moments."""
+    """ponytail: Roskam radius-of-gyration estimate (Ix=m*(Rx*b/2)^2, Iy=
+    m*(Ry*l/2)^2, see ROSKAM_RX/ROSKAM_RY above) -- light-aircraft-class
+    coefficients, not specific to this tailsitter class, so still an
+    estimate, but tracks real light-aircraft inertia far better than a
+    uniform-rod model: a rod-along-span estimate over-predicts roll inertia
+    by roughly 5x and pitch by roughly 2-3x relative to these coefficients,
+    since real airframe mass (fuselage, battery, payload) concentrates near
+    the CG rather than spreading uniformly to the tips like a rod. Missing
+    span or length zeroes that axis's own contribution (ixx needs
+    wing_span_m, iyy needs body_length_m) rather than substituting the other
+    dimension. Upgrade path: set VehicleType.inertia_kg_m2 once CAD gives
+    real principal moments."""
     if body_length_m <= 0.0 and wing_span_m <= 0.0:
         raise ValueError("estimate_inertia_kg_m2: need a positive body_length_m or wing_span_m")
-    mass_fuselage_kg = mass_kg * 0.5
-    mass_wing_kg = mass_kg * 0.5
-    i_fuselage = (mass_fuselage_kg * body_length_m ** 2) / 12.0
-    i_wing = (mass_wing_kg * wing_span_m ** 2) / 12.0
-    ixx = i_wing  # roll: resisted by wing-span mass distribution
-    iyy = i_fuselage  # pitch: resisted by fuselage-length mass distribution -- the transition axis
-    izz = i_fuselage + i_wing  # yaw: resisted by both
+    ixx = mass_kg * (ROSKAM_RX * wing_span_m / 2.0) ** 2  # roll: resisted by wing-span mass distribution
+    iyy = mass_kg * (ROSKAM_RY * body_length_m / 2.0) ** 2  # pitch: fuselage-length mass distribution -- the transition axis
+    izz = ixx + iyy  # yaw: resisted by both
     return ixx, iyy, izz
 
 

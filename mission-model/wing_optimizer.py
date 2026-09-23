@@ -69,6 +69,12 @@ MAX_WING_LOADING_KG_M2 = 97.65
 
 AR_REF = 8.0  # aspect ratio the areal-density input is quoted at
 
+# Figure of merit (FM = P_ideal/P_actual) for --objective combined's hover-power estimate: real rotors need
+# more power than ideal momentum theory, from non-uniform inflow/tip losses plus profile drag. 0.6 is the
+# value used by "Range, Endurance, and Optimal Speed Estimates for Multicopters" (arXiv:2109.04741), which
+# cites a typical 0.5-0.7 range for real propellers -- see optimize_wing_combined()'s docstring.
+FIGURE_OF_MERIT = 0.6
+
 # Reference point for the "beam" mass model (see wing_mass_g_beam()): a typical
 # small-UAV/utility-category limit load factor and a typical airfoil thickness
 # ratio (matches the 2412/4412-class sections this file's own --naca examples
@@ -331,7 +337,8 @@ def wing_mass_g_beam(area_m2: float, aspect_ratio: float, areal_density_g_m2: fl
     root bending moment scales with span, and the material needed to react a
     given moment at a given depth scales inversely with that depth -- combining
     those gives a steeper-than-sqrt AR penalty (AR^1.5, BEAM_AR_EXPONENT) than
-    wing_mass_g()'s fitted AR^0.5 default. Load factor enters linearly (mass
+    wing_mass_g()'s fitted AR^0.6 default (see its --ar-mass-exponent help
+    for the Raymer citation this reference point now comes from). Load factor enters linearly (mass
     ~ moment ~ load); thickness ratio enters as an inverse square root (a
     thinner section needs proportionally more material at the same depth to
     react the same moment). This is a first-order physical scaling, not a
@@ -381,6 +388,18 @@ def wing_mac_and_ac(root_chord_m: float, taper_ratio: float, span_m: float, plan
     where the wing's own aerodynamic center is -- NOT a full static-margin
     check, which also needs the aircraft's CG and tail contribution (out of
     scope for a wing-only script).
+
+    Known limitation: quarter-MAC is only an asymptotic result even for an
+    UNSWEPT wing (a real unswept wing at AR=20 sits closer to 0.248*MAC, not
+    exactly 0.25*MAC, per lifting-line theory) and for a SWEPT wing the true
+    AC shifts measurably aft of quarter-MAC as sweep increases (see Shevell,
+    "Fundamentals of Flight," Fig. 13.11, credited to Ilan Kroo; also
+    Schlichting & Truckenbrodt, "Aerodynamics of the Airplane") -- the
+    standard correction is the DATCOM wing-AC method (a function of AR,
+    taper, and quarter-chord sweep, historically presented as charts rather
+    than a closed form), not implemented here. For this file's typically
+    low/zero --sweep-deg usage the quarter-MAC estimate is fine; treat it
+    with more caution as --sweep-deg grows.
     """
     if planform == "elliptical":
         mac_m = (8.0 / (3.0 * math.pi)) * root_chord_m
@@ -398,18 +417,35 @@ def bending_relief_factor(planform: str, taper_ratio: float) -> float:
     rectangular one of the same area/AR, from the root bending moment a
     chord-proportional spanwise load produces (load ~ chord is the standard
     first-order assumption at a fixed cl). Integrating y*load(y) over the
-    semi-span and normalizing to the rectangular case (taper_ratio=1) gives
-    (1 + 2*taper_ratio) / 3 for a linear taper -- 1.0 at taper_ratio=1 (no
-    change from today's model), down to 1/3 at taper_ratio=0 (a triangular
-    planform). An elliptical load distribution's own integral comes out to
-    2/3 exactly, independent of any taper_ratio -- which lands near the
-    linear formula's taper_ratio~0.5 value, the well-known rule of thumb for
-    approximating elliptical loading with a linear taper.
+    semi-span gives a raw moment ~ c_root*b^2*(1+2*taper_ratio)/12 -- but
+    c_root itself must grow as taper_ratio drops to hold area/span fixed
+    (c_root = 2*mean_chord/(1+taper_ratio), same identity optimize_wing()
+    uses), which contributes an extra 2/(1+taper_ratio) factor that a naive
+    normalize-to-rectangular calculation misses. With that factor included
+    and normalized to taper_ratio=1, the correct result is
+    2*(1+2*taper_ratio) / (3*(1+taper_ratio)) for a linear taper -- 1.0 at
+    taper_ratio=1 (unchanged), down to 2/3 (not 1/3) at taper_ratio=0 (a
+    triangular planform still keeps 2/3 of the rectangular wing's root
+    moment, since it must grow a much fatter root chord to hold area/span
+    fixed as the tip pinches to zero). Cross-checked against the standard
+    constant-cl root-bending-moment result M0 = N*W*(b/12)*(1+2*lambda)/
+    (1+lambda) (MIT 16.01 Unified Engineering, "Wing Bending Calculations"),
+    which normalizes to exactly this formula. An elliptical load
+    distribution's own integral, by the same area/span-fixed accounting,
+    comes out to 8/(3*pi) (~0.849) exactly, independent of any taper_ratio
+    -- noticeably less relief than the linear formula's taper_ratio~0.5
+    value (8/9 ~ 0.889), so elliptical loading isn't well approximated by a
+    lambda~0.5 linear taper for this bending-relief purpose (it is a good
+    approximation for other elliptical-loading properties, just not this
+    one). NOTE: an earlier version of this function omitted the c_root
+    growth factor and returned (1+2*taper_ratio)/3 and 2/3 respectively --
+    those were wrong by up to 2x at taper_ratio=0 (understating true
+    structural mass) and by ~1.27x for the elliptical case.
     """
     if planform == "linear":
-        return (1.0 + 2.0 * taper_ratio) / 3.0
+        return 2.0 * (1.0 + 2.0 * taper_ratio) / (3.0 * (1.0 + taper_ratio))
     if planform == "elliptical":
-        return 2.0 / 3.0
+        return 8.0 / (3.0 * math.pi)
     raise ValueError(f"planform must be 'linear' or 'elliptical', got {planform!r}")
 
 
@@ -479,17 +515,74 @@ def optimize_wing(lift_mass_kg: float, cruise_mps: float, cl: float, min_ar: flo
     return best
 
 
+OSWALD_HIGH_AR_SWITCH = 13.0  # above this AR, Raymer's fit is extrapolating past its own data and swings
+# toward its AR~18.5 zero-crossing -- switch to Obert's better-behaved formula instead (see below).
+# Chosen above this file's own default --max-ar (10) and every AR this repo's tests exercise (<=12),
+# but comfortably below where Raymer's fit visibly degrades (e0~0.20 by AR=15).
+
+
 def oswald_efficiency(aspect_ratio: float, sweep_deg: float = 0.0) -> float:
     """Raymer's empirical Oswald efficiency estimate for a straight or
-    moderately swept subsonic wing -- the same formula
-    MyProjectsMK/Wing_optimization uses for its drag-minimizing sizing:
-    e0 = 4.61*(1 - 0.045*AR^0.68)*cos(sweep)^0.15 - 3.1. Not meant for
-    delta/highly-swept planforms. Also not meant for very high aspect
-    ratio: at zero sweep this crosses zero around AR~18.5 and goes negative
-    beyond it, which flips induced_drag_coefficient()'s sign -- keep
-    --max-ar comfortably below that for --objective drag/combined.
+    moderately swept subsonic wing (Raymer, "Aircraft Design: A Conceptual
+    Approach," Sec. 12.6, originally attributed there to Cavallo):
+    e0 = 4.61*(1 - 0.045*AR^0.68)*cos(sweep)^0.15 - 3.1 -- a regression fit
+    to conventional GA/transport aircraft at Re ~2e6-8e7. Not meant for
+    delta/highly-swept planforms.
+
+    Two known limitations for this file's use case (small UAV-scale wings,
+    Re roughly 2e5-8e5, AR 4-10 occasionally up to 15):
+
+    1. Low Reynolds number: this fit has no Re dependence, but real small
+       wings at Re~6e4-1.6e5 have been *measured* well below the ~0.7-0.85
+       band this formula implies for AR 4-10 -- Ananda, Sukumar & Selig,
+       "Measured Aerodynamic Characteristics of Wings at Low Reynolds
+       Numbers" (Aerospace Science and Technology 42, 2015) measured e from
+       ~0.3 to ~0.8 for AR 2-5 wings at Re 6e4-1.6e5; Spedding & McArthur,
+       "Span Efficiencies of Wings at Low Reynolds Numbers" (J. Aircraft
+       47(1), 2010) measured e~0.22-0.53 for an AR-6 wing at Re 2e4-6e4.
+       Both studies sit at/below the low end of this file's Re range, but
+       the underlying mechanism (laminar separation bubbles depressing e
+       below roughly Re~3e5-5e5) means real performance is likely worse
+       than this formula assumes at the slow/light end of that range,
+       converging toward Raymer's values as Re climbs toward the high end
+       with a well-behaved (non-flat-plate) airfoil. No validated low-Re
+       closed-form replacement was found in the literature (only measured
+       scatter) -- this is a documented caveat, not a code fix.
+    2. High aspect ratio: at zero sweep this fit crosses zero around
+       AR~18.5 and goes negative beyond it (flips
+       induced_drag_coefficient()'s sign) -- an extrapolation artifact of
+       fitting to conventional aircraft with no data up that high, not real
+       physics (real high-AR wings, e.g. sailplanes, don't degrade nearly
+       that fast). See oswald_efficiency_obert() for the AR>=OSWALD_HIGH_AR_SWITCH
+       replacement this file actually uses -- this function itself is
+       unchanged/still Raymer's raw fit for direct callers.
     """
     return 4.61 * (1 - 0.045 * aspect_ratio**0.68) * math.cos(math.radians(sweep_deg)) ** 0.15 - 3.1
+
+
+def oswald_efficiency_obert(aspect_ratio: float) -> float:
+    """Obert's Oswald efficiency estimate (E. Obert, "Aerodynamic Design of
+    Transport Aircraft," IOS Press, 2009; constants confirmed via secondary
+    citations -- primary text not accessed): e = 1 / (1.05 + 0.007*pi*AR).
+    Monotonic and always positive (0.88 at AR=4 down to ~0.73 at AR=15),
+    unlike oswald_efficiency()'s Raymer fit, which is not meant for AR
+    above roughly OSWALD_HIGH_AR_SWITCH (see that function's docstring).
+    No sweep term -- Obert's formula doesn't model it, so this is only used
+    where sweep_deg is small/zero anyway (this file's own --sweep-deg only
+    affects geometry, not the drag/energy objectives that call this).
+    """
+    return 1.0 / (1.05 + 0.007 * math.pi * aspect_ratio)
+
+
+def oswald_efficiency_blended(aspect_ratio: float, sweep_deg: float = 0.0) -> float:
+    """Dispatch used by every drag/energy objective in this file: Raymer's
+    fit (oswald_efficiency()) below OSWALD_HIGH_AR_SWITCH, Obert's
+    better-behaved formula (oswald_efficiency_obert()) at/above it -- avoids
+    Raymer's AR~18.5 zero-crossing without discarding it in the AR range
+    (4-10ish) it's actually fit for."""
+    if aspect_ratio >= OSWALD_HIGH_AR_SWITCH:
+        return oswald_efficiency_obert(aspect_ratio)
+    return oswald_efficiency(aspect_ratio, sweep_deg)
 
 
 def induced_drag_coefficient(cl: float, aspect_ratio: float, oswald_e: float) -> float:
@@ -503,7 +596,7 @@ def _cl_ar_candidate(lift_mass_kg: float, cruise_mps: float, cl: float, ar: floa
     can't drift apart on how a candidate's aerodynamics are computed."""
     area_m2 = required_wing_area_m2(lift_mass_kg, cruise_mps, cl)
     span_m = math.sqrt(ar * area_m2)
-    e0 = oswald_efficiency(ar, sweep_deg)
+    e0 = oswald_efficiency_blended(ar, sweep_deg)
     cdi = induced_drag_coefficient(cl, ar, e0)
     drag_n = 0.5 * RHO_AIR * cruise_mps * cruise_mps * area_m2 * (parasite_cd0 + cdi)
     return {
@@ -559,7 +652,8 @@ def optimize_wing_combined(lift_mass_kg: float, cruise_mps: float, cl_min: float
                             areal_density_g_m2: float, ar_mass_exponent: float, taper_min: float = 1.0,
                             taper_max: float = 1.0, taper_steps: int = 20, mass_model: str = "empirical",
                             load_factor: float = LOAD_FACTOR_REF, thickness_ratio: float = T_C_REF,
-                            sweep_deg: float = 0.0, cl_steps: int = 100, ar_steps: int = 100) -> dict:
+                            sweep_deg: float = 0.0, cl_steps: int = 100, ar_steps: int = 100,
+                            figure_of_merit: float = FIGURE_OF_MERIT) -> dict:
     """Grid-search (cl, aspect_ratio) jointly to minimize total mission
     energy -- the tradeoff-aware "best wing" objective, vs. optimize_wing()'s
     mass-only search (which has no reason to leave --min-ar without a span
@@ -571,16 +665,30 @@ def optimize_wing_combined(lift_mass_kg: float, cruise_mps: float, cl_min: float
     - cruise_energy_j = drag_n * cruise_mps * cruise_s -- same drag_n
       optimize_wing_drag() computes (parasite + induced), times cruise
       duration. Favors higher aspect ratio (lower induced drag).
-    - hover_energy_j = hover_power_w * hover_s, where hover_power_w is a
-      momentum-theory induced-power estimate for lifting the *whole*
-      airframe (lift_mass_kg + this candidate's wing_mass_g) at a rotor
-      disk area back-solved from disk_loading_kg_m2 at lift_mass_kg (the
-      disk is a fixed piece of hardware, sized once for the airframe's
-      baseline mass -- it doesn't change per wing candidate, only the
-      weight it has to lift does): P = T^1.5 / sqrt(2*rho*A_disk). Favors
-      lower aspect ratio and higher cl (both shrink wing_mass_g).
+    - hover_energy_j = hover_power_w * hover_s, where hover_power_w is
+      ideal momentum-theory induced power for lifting the *whole* airframe
+      (lift_mass_kg + this candidate's wing_mass_g) at a rotor disk area
+      back-solved from disk_loading_kg_m2 at lift_mass_kg (the disk is a
+      fixed piece of hardware, sized once for the airframe's baseline mass
+      -- it doesn't change per wing candidate, only the weight it has to
+      lift does): P_ideal = T^1.5 / sqrt(2*rho*A_disk), divided by
+      figure_of_merit to account for real rotors needing more power than
+      ideal momentum theory predicts (non-uniform inflow/tip losses plus
+      profile/blade drag, which ideal actuator-disk theory ignores
+      entirely). Favors lower aspect ratio and higher cl (both shrink
+      wing_mass_g).
 
-    No induced/profile-power losses, motor/prop efficiency, or non-hover
+    figure_of_merit (FM = P_ideal/P_actual) defaults to FIGURE_OF_MERIT
+    (0.6), from "Range, Endurance, and Optimal Speed Estimates for
+    Multicopters" (arXiv:2109.04741), which uses this exact P = T^1.5 /
+    (eta_P * sqrt(2*rho*pi*N_r)*r_prop) form and states "typical propellers
+    achieve a figure of merit between 0.5 and 0.7. A value of eta_P=0.6 is
+    used subsequently" -- i.e. real small-UAV hover power is roughly 1.4x-2x
+    the ideal value this model would otherwise report, folded into one
+    scalar divisor rather than a separate induced/profile-power split
+    (decomposing them needs blade geometry/airfoil drag data this file
+    doesn't model; the cited paper makes the same simplification for the
+    same reason). No motor/prop electrical efficiency or non-hover
     transition phases are modeled -- same "labeled physical estimate, not a
     real mission sim" spirit as the rest of this file (see parasite_cd0's
     default).
@@ -606,6 +714,8 @@ def optimize_wing_combined(lift_mass_kg: float, cruise_mps: float, cl_min: float
         raise ValueError(f"--hover-s/--cruise-s must be >= 0, got hover_s={hover_s}, cruise_s={cruise_s}")
     if taper_min <= 0.0 or taper_max < taper_min:
         raise ValueError(f"need 0 < taper_min <= taper_max, got taper_min={taper_min}, taper_max={taper_max}")
+    if figure_of_merit <= 0.0 or figure_of_merit > 1.0:
+        raise ValueError(f"--figure-of-merit must be in (0, 1], got {figure_of_merit}")
 
     disk_area_m2 = lift_mass_kg / disk_loading_kg_m2
     taper_values = ([taper_min] if taper_max == taper_min else
@@ -628,7 +738,7 @@ def optimize_wing_combined(lift_mass_kg: float, cruise_mps: float, cl_min: float
                 wing_mass_g_val = compute_wing_mass_g(mass_model, candidate["wing_area_m2"], ar, areal_density_g_m2,
                                                         ar_mass_exponent, relief, load_factor, thickness_ratio)
                 total_weight_n = (lift_mass_kg + wing_mass_g_val / 1000.0) * G
-                hover_power_w = total_weight_n**1.5 / math.sqrt(2 * RHO_AIR * disk_area_m2)
+                hover_power_w = (total_weight_n**1.5 / math.sqrt(2 * RHO_AIR * disk_area_m2)) / figure_of_merit
                 hover_energy_j = hover_power_w * hover_s
                 total_energy_j = cruise_energy_j + hover_energy_j
                 if best is None or total_energy_j < best["total_energy_j"]:
@@ -687,20 +797,37 @@ def main() -> None:
                          help="seconds spent at cruise in the mission this wing is sized for (--objective combined only)")
     parser.add_argument("--disk-loading-kg-m2", type=float, default=25.0,
                          help="rotor disk loading estimate, kg of lift_mass_kg per m^2 of total rotor disk "
-                              "area (default 25.0, a typical heavy-lift multirotor estimate, not measured) "
+                              "area (default 25.0, not measured against a heavy-lift-drone-specific dataset -- "
+                              "no such dataset was found; 25 sits above hobby quadcopters (~8-14) and within "
+                              "the light-helicopter-to-compact-tiltrotor range (~14-130), consistent with a "
+                              "compact-rotor cargo VTOL design, per Wikipedia's disk-loading comparison table) "
                               "-- sets the fixed disk area momentum-theory hover power is computed against "
                               "for --objective combined")
+    parser.add_argument("--figure-of-merit", type=float, default=FIGURE_OF_MERIT,
+                         help=f"hover figure of merit (P_ideal/P_actual, default {FIGURE_OF_MERIT:g}) applied "
+                              "to --objective combined's momentum-theory hover power estimate -- real rotors "
+                              "need more power than ideal momentum theory (non-uniform inflow/tip losses plus "
+                              "profile drag); see optimize_wing_combined()'s docstring for the source "
+                              "(arXiv:2109.04741, typical range 0.5-0.7)")
     parser.add_argument("--parasite-cd0", type=float, default=0.045,
                          help="zero-lift drag coefficient referenced to wing area, matching Mission_Model.py's "
-                              "VehicleType.parasite_cd0 default (default 0.045); drives --objective drag's "
-                              "drag estimate and is written into --out's vehicle entry when non-default")
+                              "VehicleType.parasite_cd0 default (default 0.045, checked against literature: "
+                              "sits above clean/faired light-GA aircraft, ~0.016-0.034, which is expected for "
+                              "an unfaired small VTOL with exposed rotors/arms -- the literature-consistent "
+                              "band for this vehicle class is roughly 0.04-0.06, so 0.045 is reasonable, not "
+                              "clearly low or high); drives --objective drag's drag estimate and is written "
+                              "into --out's vehicle entry when non-default")
     parser.add_argument("--min-ar", type=float, default=4.0, help="lowest aspect ratio to consider (default 4)")
     parser.add_argument("--max-ar", type=float, default=10.0, help="highest aspect ratio to consider (default 10)")
     parser.add_argument("--max-span-m", type=float, default=None, help="optional wingspan cap, e.g. a transport/storage limit")
     parser.add_argument("--areal-density-g-m2", type=float, default=1500.0,
                          help=f"structural mass per m^2 of wing area at AR={AR_REF:g} (default 1500 g/m^2)")
-    parser.add_argument("--ar-mass-exponent", type=float, default=0.5,
-                         help="how fast structural mass grows with aspect ratio above the reference (default 0.5, an estimate)")
+    parser.add_argument("--ar-mass-exponent", type=float, default=0.6,
+                         help="how fast structural mass grows with aspect ratio above the reference (default "
+                              "0.6, from Raymer's general-aviation wing-weight regression -- Aircraft Design: "
+                              "A Conceptual Approach -- which at fixed wing area reduces to mass ~ AR^0.6; "
+                              "the literature-supported band across Raymer/Roskam-family statistical wing-weight "
+                              "methods is roughly 0.5-0.75)")
     parser.add_argument("--name", default="OptimizedWing", help="name field for the emitted JSON entry")
     parser.add_argument("--out", default=None, help="optional path to a vehicle_configs-style JSON file to append the result to")
     parser.add_argument("--num-rotors", type=int, default=None, help="VehicleType.num_rotors for the --out entry (required if --out is given)")
@@ -843,6 +970,7 @@ def main() -> None:
             taper_max=args.taper_max if args.taper_max is not None else args.taper_ratio,
             mass_model=args.mass_model, load_factor=args.load_factor,
             thickness_ratio=args.airfoil_thickness_ratio, sweep_deg=args.sweep_deg,
+            figure_of_merit=args.figure_of_merit,
         )
         cl_used = result["cl"]
 
@@ -881,7 +1009,8 @@ def main() -> None:
         print(f"drag_n:             {result['drag_n']:.4f}   (at cruise, parasite + induced)")
     if args.objective == "combined":
         print(f"disk_area_m2:       {result['disk_area_m2']:.4f}   (from lift_mass_kg / --disk-loading-kg-m2={args.disk_loading_kg_m2:g})")
-        print(f"hover_power_w:      {result['hover_power_w']:.2f}   (momentum-theory induced power estimate)")
+        print(f"hover_power_w:      {result['hover_power_w']:.2f}   (momentum-theory induced power / "
+              f"--figure-of-merit={args.figure_of_merit:g})")
         print(f"hover_energy_j:     {result['hover_energy_j']:.1f}   (over --hover-s={args.hover_s:g})")
         print(f"cruise_energy_j:    {result['cruise_energy_j']:.1f}   (over --cruise-s={args.cruise_s:g})")
         print(f"total_energy_j:     {result['total_energy_j']:.1f}   (minimized objective)")
@@ -924,6 +1053,7 @@ def main() -> None:
                 "sweep_deg": args.sweep_deg, "twist_deg": args.twist_deg,
                 "naca": args.naca, "closed_te": not args.open_te, "airfoil_dat": args.airfoil_dat,
                 "hover_s": args.hover_s, "cruise_s": args.cruise_s, "disk_loading_kg_m2": args.disk_loading_kg_m2,
+                "figure_of_merit": args.figure_of_merit,
             },
             "wing_area_m2": round(result["wing_area_m2"], 4),
             "aspect_ratio": round(result["aspect_ratio"], 4),

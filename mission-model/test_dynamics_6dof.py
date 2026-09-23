@@ -9,6 +9,7 @@ from dynamics_6dof import (
     quat_derivative, quat_from_axis_angle, quat_log, quat_log_error,
     HOVER_QUAT, CRUISE_QUAT, G as DYN_G, RHO_AIR as DYN_RHO_AIR,
     estimate_inertia_kg_m2, estimate_max_torque_n_m,
+    ROSKAM_RX, ROSKAM_RY,
     transition_accel, transition_decel, _integrate_transition,
 )
 from Mission_Model import G, RHO_AIR
@@ -72,13 +73,13 @@ def test_quat_conjugate_of_unit_quaternion_is_its_inverse():
     assert np.allclose(identity, [1.0, 0.0, 0.0, 0.0], atol=1e-9)
 
 
-def test_estimate_inertia_matches_hand_computed_rod_formula():
+def test_estimate_inertia_matches_hand_computed_roskam_formula():
     ixx, iyy, izz = estimate_inertia_kg_m2(mass_kg=2.0, body_length_m=1.0, wing_span_m=2.0)
-    expected_i_fuselage = (1.0 * 1.0 ** 2) / 12.0  # half the mass, rod along body length
-    expected_i_wing = (1.0 * 2.0 ** 2) / 12.0  # half the mass, rod along wingspan
-    assert math.isclose(iyy, expected_i_fuselage)  # pitch: fuselage-length mass distribution
-    assert math.isclose(ixx, expected_i_wing)  # roll: wingspan mass distribution
-    assert math.isclose(izz, expected_i_fuselage + expected_i_wing)  # yaw: both
+    expected_ixx = 2.0 * (ROSKAM_RX * 2.0 / 2.0) ** 2  # roll: Roskam Rx applied to wingspan
+    expected_iyy = 2.0 * (ROSKAM_RY * 1.0 / 2.0) ** 2  # pitch: Roskam Ry applied to body length
+    assert math.isclose(iyy, expected_iyy)  # pitch: fuselage-length mass distribution
+    assert math.isclose(ixx, expected_ixx)  # roll: wingspan mass distribution
+    assert math.isclose(izz, expected_ixx + expected_iyy)  # yaw: both
 
 
 def test_estimate_inertia_rejects_zero_geometry():
@@ -131,19 +132,19 @@ def test_estimate_max_torque_fallback_roll_arm_when_wing_span_zero():
 
 
 def test_estimate_inertia_succeeds_with_asymmetric_zero():
-    # body_length_m=0, wing_span_m>0: should not raise, i_fuselage=0, ixx and izz from wing only
+    # body_length_m=0, wing_span_m>0: should not raise, iyy=0, ixx and izz from wing only
     ixx, iyy, izz = estimate_inertia_kg_m2(mass_kg=2.0, body_length_m=0.0, wing_span_m=2.0)
-    expected_i_wing = (1.0 * 2.0 ** 2) / 12.0
-    assert math.isclose(ixx, expected_i_wing)  # roll: wing only
+    expected_ixx = 2.0 * (ROSKAM_RX * 2.0 / 2.0) ** 2
+    assert math.isclose(ixx, expected_ixx)  # roll: wing only
     assert math.isclose(iyy, 0.0)  # pitch: fuselage zero
-    assert math.isclose(izz, expected_i_wing)  # yaw: wing only
+    assert math.isclose(izz, expected_ixx)  # yaw: wing only
 
-    # wing_span_m=0, body_length_m>0: should not raise, i_wing=0, iyy and izz from fuselage only
+    # wing_span_m=0, body_length_m>0: should not raise, ixx=0, iyy and izz from fuselage only
     ixx, iyy, izz = estimate_inertia_kg_m2(mass_kg=2.0, body_length_m=1.0, wing_span_m=0.0)
-    expected_i_fuselage = (1.0 * 1.0 ** 2) / 12.0
+    expected_iyy = 2.0 * (ROSKAM_RY * 1.0 / 2.0) ** 2
     assert math.isclose(ixx, 0.0)  # roll: wing zero
-    assert math.isclose(iyy, expected_i_fuselage)  # pitch: fuselage only
-    assert math.isclose(izz, expected_i_fuselage)  # yaw: fuselage only
+    assert math.isclose(iyy, expected_iyy)  # pitch: fuselage only
+    assert math.isclose(izz, expected_iyy)  # yaw: fuselage only
 
 
 def _synthetic_params():
