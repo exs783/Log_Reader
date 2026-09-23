@@ -1,5 +1,6 @@
 """Self-check for Mission Model.py. Run: python test_mission_model.py"""
 
+import dataclasses
 import importlib.util
 import math
 import os
@@ -111,16 +112,22 @@ def test_extra_payload_increases_segment_energy():
     assert e_light < mm.INFEASIBLE_ENERGY_MAH
 
 
-def test_wings_reduce_required_tilt_and_speed_up_accel():
+def test_wings_reduce_required_tilt():
     """Wing lift should offload weight-support so the same throttle produces
-    more usable horizontal thrust (smaller tilt-inflated drag area, faster
-    acceleration) than an otherwise-identical wingless vehicle. (Total
-    segment energy isn't a reliable proxy for this: this model's decel
-    phase decays down to a fixed 1 m/s floor, and its average speed during
-    that decay is independent of drag by construction -- less drag just
-    stretches the slow tail rather than covering proportionally more
-    ground, which can outweigh the accel-phase gain. That's inherited from
-    the original decel formulation, not specific to wings.)"""
+    more usable horizontal thrust (smaller tilt-inflated drag area) than an
+    otherwise-identical wingless vehicle. Checked directly against
+    _effective_area_at() rather than via segment()'s total time/energy,
+    which also folds in decel and cruise-speed effects that aren't this
+    test's concern.
+
+    This test used to also exercise the retired _accel_phase(has_wing=True)
+    numeric tilt-area integrator by asserting it reached v_target faster/in
+    less distance than the wingless closed-form path -- that whole numeric
+    winged-accel approach is gone now (Task 4 of the quaternion-6DOF-
+    transition plan), replaced by dynamics_6dof.transition_accel's real
+    attitude integration, which isn't a drop-in comparable quantity against
+    the wingless closed form. The winged accel path's own feasibility is
+    covered instead by test_segment_winged_vehicle_uses_6dof_transition_and_is_feasible."""
     cfg = make_cfg(thrust_at_100=3000.0, current_at_100=25.0)
     winged = mm.VehicleType(
         name="winged", num_rotors=mm.MULTIROTOR.num_rotors, base_mass_g=mm.MULTIROTOR.base_mass_g,
@@ -138,13 +145,6 @@ def test_wings_reduce_required_tilt_and_speed_up_accel():
         area_wing = mm._effective_area_at(thrust_n, weight_n, base_area, lift_fn, v)
         area_plain = mm._effective_area_at(thrust_n, weight_n, base_area, no_lift_fn, v)
         assert area_wing <= area_plain + 1e-9, (v, area_wing, area_plain)
-
-    t_wing, x_wing, _ = mm._accel_phase(thrust_n, weight_n, base_area, mm.MULTIROTOR.drag_cd, mass_kg,
-                                         lift_fn, True, v0=1.0, v_target=10.0, distance_cap=10_000.0)
-    t_plain, x_plain, _ = mm._accel_phase(thrust_n, weight_n, base_area, mm.MULTIROTOR.drag_cd, mass_kg,
-                                           no_lift_fn, False, v0=1.0, v_target=10.0, distance_cap=10_000.0)
-    assert t_wing < t_plain, (t_wing, t_plain)
-    assert x_wing < x_plain, (x_wing, x_plain)
 
 
 def test_mission_runs_and_reports_consistent_energy():
@@ -384,6 +384,213 @@ def test_run_skips_voltage_mismatched_battery_pairs():
         df2 = mm.run(tmp_dir, grid_step=5.0, batteries=mixed)
         assert len(df2) == 1
         assert df2.iloc[0]["battery"] == "6S-pack"
+
+
+def test_run_auto_series_stacks_a_lower_voltage_battery_to_reach_the_motor():
+    import json
+    import tempfile
+
+    motor_data = [{
+        "motor_model": "TestMotor24S",
+        "prop_diameter_in": 16, "motor_mass_g": 100, "prop_mass_g": 20,
+        "motor_cost": 50, "prop_cost": 10, "cells_s": 24,
+        "throttle_pct": [40, 60, 80, 100], "thrust_g": [1000, 1500, 2100, 2800],
+        "current_a": [8, 12, 18, 25],
+    }]
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        with open(os.path.join(tmp_dir, "motor.json"), "w") as f:
+            json.dump(motor_data, f)
+
+        # 24 is a multiple of 12 (x2) but not of 8 (24/8 = 3 -- that one
+        # *is* an integer multiple too, so both should synthesize a stack).
+        base_12s = mm.Battery(name="12S-pack", mass_g=2000.0, capacity_mah=16000.0, cost_usd=300.0, cells_s=12)
+        odd_9s = mm.Battery(name="9S-pack", mass_g=500.0, capacity_mah=5000.0, cost_usd=80.0, cells_s=9)
+        df = mm.run(tmp_dir, grid_step=5.0, batteries=[base_12s, odd_9s])
+
+        assert len(df) == 1  # 9S has no integer stack to 24S -- still skipped
+        row = df.iloc[0]
+        assert row["battery"] == "12S-pack_x2S"
+        assert row["cells_s"] == 24
+        assert row["battery_capacity_mah"] == 16000.0  # series stacking doesn't add capacity
+
+        stacked = mm.series_stack_battery(base_12s, 2)
+        assert stacked.mass_g == 4000.0  # mass doubles with 2 packs in series
+        assert stacked.cost_usd == 600.0
+        assert stacked.capacity_mah == 16000.0
+        assert stacked.cells_s == 24
+
+
+def test_parasite_drag_area_zero_for_wingless():
+    assert mm.parasite_drag_area_m2(mm.MULTIROTOR) == 0.0  # wing_area_m2=0 zeroes it regardless of parasite_cd0
+
+
+def test_parasite_drag_area_matches_formula_for_winged():
+    winged = dataclasses.replace(mm.MULTIROTOR, wing_area_m2=2.0, wing_cl=0.6, drag_cd=0.4, parasite_cd0=0.05)
+    assert math.isclose(mm.parasite_drag_area_m2(winged), 0.05 * 2.0 / 0.4, rel_tol=1e-12)
+
+
+def test_effective_area_at_adds_parasite_area():
+    lift_fn = lambda _v: 0.0
+    base = mm._effective_area_at(thrust_n=100.0, weight_n=50.0, base_area_m2=0.2, lift_fn=lift_fn, v=5.0)
+    with_parasite = mm._effective_area_at(thrust_n=100.0, weight_n=50.0, base_area_m2=0.2, lift_fn=lift_fn, v=5.0,
+                                           parasite_area_m2=0.3)
+    assert math.isclose(with_parasite, base + 0.3, rel_tol=1e-12)
+
+
+def test_parasite_drag_lowers_equilibrium_velocity_for_a_winged_vehicle():
+    """Regression for the validation spike's finding: a winged vehicle's
+    equilibrium cruise speed came out at 150-200 m/s (10x too fast for any
+    real aircraft this size) because the only drag area modeled was the
+    prop/frame frontal area -- the wing's own parasite drag wasn't in the
+    equation at all. Adding it (parasite_cd0 > 0) must pull the equilibrium
+    speed down, not leave it unchanged."""
+    cfg = make_cfg(thrust_at_100=3000.0, current_at_100=25.0)
+    thrust_n = mm.rotor_set_thrust_n(mm.MULTIROTOR, cfg, 100.0)
+    base_area = mm.frontal_area_m2(mm.MULTIROTOR, cfg)
+    winged_no_parasite = dataclasses.replace(mm.MULTIROTOR, wing_area_m2=2.0, wing_cl=0.6, parasite_cd0=0.0)
+    winged_with_parasite = dataclasses.replace(mm.MULTIROTOR, wing_area_m2=2.0, wing_cl=0.6, parasite_cd0=0.045)
+    weight_n = 100.0  # well under this cfg's ~177 N max thrust so both cases can actually reach equilibrium
+    lift_fn_a = lambda v: mm.wing_lift_n(winged_no_parasite, v)
+    lift_fn_b = lambda v: mm.wing_lift_n(winged_with_parasite, v)
+    v_eq_no_parasite = mm._equilibrium_velocity(thrust_n, weight_n, base_area, winged_no_parasite.drag_cd, lift_fn_a)
+    v_eq_with_parasite = mm._equilibrium_velocity(
+        thrust_n, weight_n, base_area, winged_with_parasite.drag_cd, lift_fn_b,
+        parasite_area_m2=mm.parasite_drag_area_m2(winged_with_parasite),
+    )
+    assert v_eq_with_parasite < v_eq_no_parasite, (v_eq_with_parasite, v_eq_no_parasite)
+
+
+def test_equilibrium_velocity_is_where_drag_balances_horizontal_thrust():
+    """The cruise speed is no longer prescribed -- it's the root of
+    thrust_horizontal(v) = drag(v). Check both the wingless closed-form case
+    and the winged one, by evaluating the balance at the returned speed."""
+    for lift_fn, thrust_n in (((lambda _v: 0.0), 4000.0), ((lambda v: 0.5 * mm.RHO_AIR * 0.9 * 1.2 * v * v), 2000.0)):
+        weight_n = 1500.0
+        area, cd = 0.4, 1.0
+        v_eq = mm._equilibrium_velocity(thrust_n, weight_n, area, cd, lift_fn)
+        assert v_eq > 0
+        effective_weight_n = max(weight_n - lift_fn(v_eq), 0.0)
+        thrust_h = math.sqrt(thrust_n ** 2 - effective_weight_n ** 2)
+        drag = 0.5 * mm.RHO_AIR * cd * area * (thrust_n / thrust_h) * v_eq ** 2
+        assert math.isclose(thrust_h, drag, rel_tol=1e-6)
+
+    # Can't even lift itself: no forward speed, and the leg is infeasible.
+    assert mm._equilibrium_velocity(1000.0, 1500.0, 0.4, 1.0, lambda _v: 0.0) == 0.0
+
+
+def test_cruise_speed_is_capped_at_max_speed_mps():
+    """A vehicle with plenty of thrust to spare (equilibrium speed well
+    above the governor) should cruise at max_speed_mps, not its bare
+    thrust/drag equilibrium."""
+    cfg = make_cfg(thrust_at_100=6000.0, current_at_100=25.0)  # overpowered -> high v_eq
+    fast_governed = dataclasses.replace(mm.MULTIROTOR, max_speed_mps=15.0)
+    t, _e = mm.segment(fast_governed, cfg, BATTERY, throttle_pct=100.0, distance_m=3000.0)
+    # Below governor, hover mass ~120 kg dominates the leg at 15 m/s:
+    # 3000 m at (up to) 15 m/s takes at least 200 s.
+    assert t >= 200.0
+
+    uncapped = dataclasses.replace(mm.MULTIROTOR, max_speed_mps=1000.0)
+    t_uncapped, _e2 = mm.segment(uncapped, cfg, BATTERY, throttle_pct=100.0, distance_m=3000.0)
+    assert t_uncapped < t  # same vehicle, no governor -> faster
+
+
+def test_decel_is_powered_so_less_drag_never_makes_a_leg_slower():
+    """Regression: with the old unpowered-coast decel, both the distance and
+    time to decay from cruise speed down to the 1 m/s floor scaled as 1/kk,
+    so a LOWER-drag vehicle took LONGER to finish a leg -- backwards for a
+    model whose whole point is flying it as efficiently as possible. Braking
+    with the rotors instead of coasting on drag should make leg time
+    monotonically non-increasing as drag drops."""
+    cfg = make_cfg(thrust_at_100=3000.0, current_at_100=25.0)
+    times = []
+    for cd in (1.28, 0.5, 0.1):
+        v = dataclasses.replace(mm.MULTIROTOR, drag_cd=cd, max_speed_mps=1000.0)  # ungoverned
+        t, _e = mm.segment(v, cfg, BATTERY, throttle_pct=80.0, distance_m=2000.0)
+        times.append(t)
+    assert times[0] > times[1] > times[2], times
+
+
+def test_leg_is_no_longer_flown_at_the_old_fixed_10_mps_target():
+    """A vehicle with thrust to spare now cruises at its own equilibrium
+    speed, so it covers the leg faster than the retired 10 m/s target
+    would have (2000 m / 10 m/s = 200 s, before takeoff/landing)."""
+    cfg = make_cfg(thrust_at_100=3000.0, current_at_100=25.0)
+    t, _e = mm.segment(mm.MULTIROTOR, cfg, BATTERY, throttle_pct=80.0, distance_m=2000.0)
+    assert t < 200.0
+    assert not hasattr(mm.MULTIROTOR, "cruise_velocity_mps")
+
+
+def test_segment_winged_vehicle_uses_6dof_transition_and_is_feasible():
+    """A reasonably powered tailsitter completes a cruise leg via the
+    quaternion 6DOF transition path (has_wing branch) with finite, sane
+    time/energy. Every other test in this file exercises the wingless
+    MULTIROTOR path and must keep passing unchanged -- that's this
+    change's main safety net."""
+    cfg = make_cfg(thrust_at_100=4000.0, current_at_100=30.0)
+    vehicle = dataclasses.replace(mm.MULTIROTOR, wing_area_m2=1.0, wing_cl=0.9, max_speed_mps=20.0)
+    t, e = mm.segment(vehicle, cfg, BATTERY, throttle_pct=80.0, distance_m=2000.0)
+    assert t < mm.INFEASIBLE_TIME_S
+    assert e < mm.INFEASIBLE_ENERGY_MAH
+    assert t > 0.0 and e > 0.0
+
+
+def test_segment_winged_vehicle_infeasible_with_negligible_torque_authority():
+    """Forcing max_control_torque_n_m to near-zero means the tailsitter can
+    never pitch over into cruise attitude -- segment() should report the
+    leg as infeasible, not raise or hang.
+
+    Back on the plan's original parameters (wing_cl=0.9, throttle_pct=80.0,
+    no inertia override). Task 4 had to weaken them (wing_cl=0.05,
+    throttle 50, inertia 1e6) because two attitude-blind bugs in
+    dynamics_6dof let a vehicle that never pitches still "reach v_target":
+    world-vertical lift that grew with climb speed, and a speed event
+    measured as a magnitude, which reads a vehicle blown backwards as
+    fast. Both are fixed, so the honest parameters work again -- verified
+    numerically as infeasible across the whole throttle range 40-100, not
+    a knife-edge point."""
+    cfg = make_cfg(thrust_at_100=4000.0, current_at_100=30.0)
+    vehicle = dataclasses.replace(mm.MULTIROTOR, wing_area_m2=1.0, wing_cl=0.9, max_speed_mps=20.0,
+                                   max_control_torque_n_m=(1e-6, 1e-6, 1e-6))
+    t, e = mm.segment(vehicle, cfg, BATTERY, throttle_pct=80.0, distance_m=2000.0)
+    assert t == mm.INFEASIBLE_TIME_S
+    assert e == mm.INFEASIBLE_ENERGY_MAH
+
+
+def test_segment_real_tailsitter_config_is_feasible():
+    """Whole-branch regression guard: every other winged test here uses a
+    fabricated vehicle, and none of them caught the lift bug that made
+    segment() report every real tailsitter INFEASIBLE. This one flies a
+    catalogue vehicle on a catalogue motor.
+
+    Two real operating points: unloaded at 70% (the reviewer's repro), and
+    the loaded mission condition (220 lb payload) at 80%. Both used to be
+    INFEASIBLE. The t bound is a generous sanity check, not a pin -- the
+    pre-regression closed-form model gave 111.6 s for the unloaded case."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    vehicles = {v.name: v for v in mm.load_vehicle_types(os.path.join(here, "vechicle_configs", "TailSitter.json"))}
+    cfgs = {c.motor_model: c for c in
+            mm.load_motor_configs(os.path.join(here, "Motors", "TMOTOR_U15XXL_KV29.json"))}
+    vehicle = vehicles["TailSitter_Contra_Compact"]
+    cfg = cfgs["TMOTOR_U15XXL_KV29"]
+    assert cfg.cells_s == 24  # battery below must match: a motor curve is only valid at its measured voltage
+    battery = mm.Battery(name="test-24S", mass_g=9345.0, capacity_mah=30000.0, cost_usd=2651.0, cells_s=24)
+
+    for throttle_pct, payload_g in ((70.0, 0.0), (80.0, 220.0 * mm.LB_TO_G)):
+        t, e = mm.segment(vehicle, cfg, battery, throttle_pct=throttle_pct, distance_m=2000.0,
+                          extra_payload_g=payload_g)
+        assert t < mm.INFEASIBLE_TIME_S, f"throttle {throttle_pct}, payload {payload_g:.0f}g: infeasible time"
+        assert e < mm.INFEASIBLE_ENERGY_MAH, f"throttle {throttle_pct}, payload {payload_g:.0f}g: infeasible energy"
+        assert 0.0 < t < 300.0, f"throttle {throttle_pct}, payload {payload_g:.0f}g: implausible t={t}"
+        assert e > 0.0
+
+
+def test_vehicle_type_fields_load_and_ignore_still_work():
+    """New optional fields are picked up by VEHICLE_TYPE_FIELDS the same
+    way every other optional VehicleType field already is."""
+    assert "wing_span_m" in mm.VEHICLE_TYPE_FIELDS
+    assert "body_length_m" in mm.VEHICLE_TYPE_FIELDS
+    assert "inertia_kg_m2" in mm.VEHICLE_TYPE_FIELDS
+    assert "max_control_torque_n_m" in mm.VEHICLE_TYPE_FIELDS
 
 
 if __name__ == "__main__":

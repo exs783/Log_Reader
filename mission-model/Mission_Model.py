@@ -37,10 +37,10 @@ Changes vs. the MATLAB original (see inline notes at each site):
   - Wing lift (0.5*rho*CL*S*v^2) is subtracted from the weight the rotors
     must support during cruise. For a wingless vehicle this is always zero
     and the fast closed-form path above still applies. For a winged one,
-    thrust_horizontal grows (and required tilt shrinks) as airspeed builds,
-    which makes the accel-phase ODE velocity-coupled and no longer
-    closed-form -- that one phase, for winged vehicles only, is solved
-    numerically (scipy.solve_ivp) instead.
+    lift and thrust direction both depend on attitude, which makes the
+    transition phases velocity- and attitude-coupled and no longer
+    closed-form -- those phases, for winged vehicles only, are integrated
+    as a quaternion 6DOF rigid body in dynamics_6dof.py instead.
   - The MATLAB course (timed laps, maximize lap count, patternsearch
     MultiStart) is replaced by a fixed one-pass course: takeoff/100ft,
     cruise 1nm, land, pick up cargo, takeoff, cruise 8nm, land, drop cargo,
@@ -55,10 +55,19 @@ Changes vs. the MATLAB original (see inline notes at each site):
     the original).
   - VehicleType gained arm_mass_g (a flat extra structural mass, independent
     of prop size -- distinct from arm_extra_mass_per_in, which is the
-    *additional* mass for oversized props) and cruise_velocity_mps (an
-    airframe can target a forward cruise speed other than the inherited
-    10 m/s default -- a fixed-wing-ish hybrid is typically designed around
-    a much faster cruise point than a hovering multirotor).
+    *additional* mass for oversized props).
+  - Cruise speed is no longer a prescribed target (the original's fixed
+    10 m/s). Each leg accelerates to the steady speed where drag balances
+    the horizontal thrust the chosen throttle actually leaves over (capped
+    at VehicleType.max_speed_mps, an airspeed governor -- the bare
+    thrust/drag balance alone comes out unrealistically high for this
+    model's small frontal areas), holds it, then coasts down -- so speed
+    is an output of the throttle, and the per-leg throttle search (minimum
+    energy) is what "fly it as efficiently as possible" now means. Decel
+    back down to the 1 m/s landing-approach floor is likewise powered
+    braking (rotors tilted the other way) instead of an unpowered drag-only
+    coast -- the coast's decay time scaled as 1/kk, so a lower-drag vehicle
+    took *longer* to finish a leg, which a braking VTOL doesn't have to.
   - The motor-config folder, vehicle types, and batteries are all run-time
     inputs now rather than hard-coded: pass --data-dir/--vehicle-file/
     --battery-file, or leave them off and the script prompts for each
@@ -93,9 +102,10 @@ from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
-from scipy.integrate import solve_ivp
 from scipy.interpolate import PchipInterpolator
 from scipy.optimize import brentq
+
+import dynamics_6dof
 
 # ---------------------------------------------------------------------------
 # Assumptions and parameters
@@ -106,7 +116,20 @@ RHO_AIR = 1.225  # kg/m^3
 
 THROTTLE_MIN, THROTTLE_MAX = 40.0, 100.0
 
-TARGET_CRUISE_VELOCITY_MPS = 10.0  # inherited from the original model, unchanged
+# Cruise speed isn't prescribed: each leg is flown at whatever steady speed
+# the chosen throttle settles at, and the throttle search picks the setting
+# that covers the leg for the least energy. The accel phase ends this close
+# to that equilibrium (reaching it exactly takes infinite time).
+CRUISE_V_FRACTION = 0.995
+
+# Airspeed governor: real airframes don't fly at whatever speed their thrust
+# happens to equilibrate at (that number comes out triple digits for this
+# model's small frontal areas -- unrealistic). 18 m/s (~35 kt) is a
+# reasonable cruise cap for a heavy-lift cargo VTOL in this weight class;
+# override per-airframe via VehicleType.max_speed_mps if a given design is
+# rated faster or slower.
+DEFAULT_MAX_SPEED_MPS = 18.0
+
 TARGET_TAKEOFF_ALTITUDE_M = 30.48  # 100 ft
 
 LANDING_START_ALT_M = 30.48  # 100 ft, matches the new takeoff altitude
@@ -148,9 +171,35 @@ class Battery:
     cost_usd: float
     cells_s: int  # cell count (6S/12S/24S/...) -- a motor's thrust/current curve is only
     # valid at the voltage it was measured on, so a motor is only paired with a battery
-    # of the *same* cells_s (see run()); this model doesn't extrapolate performance
-    # across voltages, since doing that accurately needs a validated KV/voltage scaling
-    # law this project doesn't have data to back.
+    # of that same cells_s, or with several of a *lower* cells_s wired in series to reach
+    # it (see series_stack_battery() and run()); this model doesn't extrapolate curve
+    # performance across voltages, since doing that accurately needs a validated KV/
+    # voltage scaling law this project doesn't have data to back -- stacking packs changes
+    # the electrical supply, not the motor's own measured curve, so it stays valid.
+    # Checked against literature: a naive affinity-law voltage rescaling (thrust~V^2,
+    # power~V^3) of a raw measured curve is not well-validated -- real tools that do
+    # extrapolate across voltage (eCalc propCalc, ArduPilot DriveCalculator) use a full
+    # motor equivalent-circuit model (KV, winding resistance, no-load current) plus
+    # voltage-independent propeller Ct/Cp coefficients, not a rescaled curve, and that
+    # needs calibration data (at least two voltage points, or Rm/Io) this project
+    # doesn't have -- so refusing to extrapolate is the technically correct call given
+    # what data exists, not overly conservative.
+
+
+def series_stack_battery(battery: Battery, k: int) -> Battery:
+    """k copies of `battery` wired in series: voltage (cells_s) multiplies by k,
+    capacity stays the same (series adds volts, not amp-hours), mass/cost scale
+    linearly with the extra packs. This is the manual "12Sx2 -> 24S" pattern
+    battery lineups have used by hand -- generalized so run() can synthesize it
+    for any battery/motor voltage gap that's an integer multiple, instead of
+    requiring a hand-authored pack for every voltage a motor happens to need."""
+    return dataclasses.replace(
+        battery,
+        name=f"{battery.name}_x{k}S",
+        mass_g=battery.mass_g * k,
+        cost_usd=battery.cost_usd * k,
+        cells_s=battery.cells_s * k,
+    )
 
 
 # Reproduces the original MATLAB model's battery lineup. cells_s wasn't part
@@ -212,11 +261,50 @@ class VehicleType:
     base_mass_g: float  # frame + electronics + payload mounting; no battery/motors/cargo
     arm_mass_g: float = 0.0  # flat extra structural mass for the arms, independent of prop size
     arm_diameter_threshold_in: float = 18.0
-    arm_extra_mass_per_in: float = 22.5  # *additional* arm mass per inch of prop diameter beyond the threshold
+    # *additional* arm mass per inch of prop diameter beyond the threshold. Not traceable to a citable
+    # source (practitioner/hand-tuned knowledge) -- literature on multirotor scaling laws suggests structural
+    # mass should grow *faster* than linear with prop size (bigger props need proportionally stiffer, not
+    # just proportionally heavier, arms), so this linear-beyond-threshold model is a defensible simplification
+    # of that reality, but the specific slope has no external backing either way.
+    arm_extra_mass_per_in: float = 22.5
+    # Frontal-area-referenced drag coefficient for the open multirotor frame
+    # (arms, motors, legs -- a bluff, non-streamlined shape). Checked against
+    # literature: a hobbyist racing-frame estimate (Flite Test, "Aerodynamics
+    # in Racing Multirotors") puts Cd~1 for a bare racing quad frame; general
+    # bluff-body/open-lattice references (flat plate ~1.17-2.0, open lattice/
+    # cyclist ~0.9-1.2) support a higher value for a bulkier, motor-nacelle-
+    # and-leg-laden cargo frame. 1.28 is upper-middle of that ~1.0-1.3 band --
+    # reasonable, not a documented number for this specific vehicle class.
     drag_cd: float = 1.28
     wing_area_m2: float = 0.0  # 0 = no wings
     wing_cl: float = 0.0  # lift coefficient at cruise attitude; ignored if wing_area_m2 is 0
-    cruise_velocity_mps: float = TARGET_CRUISE_VELOCITY_MPS  # target forward cruise speed for this airframe
+    max_speed_mps: float = DEFAULT_MAX_SPEED_MPS  # airspeed governor -- see constant's comment
+    # Zero-lift ("parasite") drag coefficient, referenced to wing_area_m2 --
+    # the standard fixed-wing-aircraft convention (unlike drag_cd, which is
+    # referenced to the prop/frame frontal area -- see parasite_drag_area_m2()
+    # for how the two get combined). Covers the wing's own skin-friction and
+    # form drag at cruise attitude, which the frontal-area model has no other
+    # way to represent (that model's "effective area" only grows with tilt,
+    # so a winged vehicle flying near-level at cruise -- most of its weight
+    # supported by wing lift, not thrust -- got essentially the bare prop
+    # frontal area and nothing for the wing itself). 0.045 is mid-range for
+    # a light, somewhat-draggy UAV airframe (clean sailplanes run ~0.02,
+    # draggy UAVs with exposed motor pods/struts run ~0.06); checked against
+    # literature (clean light-GA aircraft run ~0.016-0.034, per Raymer/
+    # Gudmundsson-style drag-buildup conventions) and found reasonable, not
+    # clearly low or high, for an unfaired small cargo VTOL; ignored when
+    # wing_area_m2 is 0.
+    parasite_cd0: float = 0.045
+    # -- Tailsitter transition dynamics (dynamics_6dof.py) -- all optional;
+    # 0.0/None means "estimate from what's already here," matching this
+    # model's other geometry defaults. Only read when wing_area_m2 > 0
+    # (has_wing) -- a wingless vehicle never touches these.
+    wing_span_m: float = 0.0  # 0 -> estimate as sqrt(6 * wing_area_m2), AR=6 assumed
+    body_length_m: float = 0.0  # 0 -> estimate as 2 prop diameters
+    inertia_kg_m2: tuple[float, float, float] | None = None  # (Ixx, Iyy, Izz); None -> geometric estimate
+    max_control_torque_n_m: tuple[float, float, float] | None = None  # (roll, pitch, yaw) N*m; None -> geometric estimate
+    attitude_kp: float = 4.0  # transition attitude-control proportional gain
+    attitude_kd: float = 2.0  # transition attitude-control derivative gain
 
 
 # Reproduces the original MATLAB model's single hard-coded airframe.
@@ -241,7 +329,7 @@ def load_vehicle_types(path: str) -> list[VehicleType]:
         [
           {"name": "Multirotor-6", "num_rotors": 6, "base_mass_g": 4500},
           {"name": "Hybrid-VTOL", "num_rotors": 4, "base_mass_g": 5200,
-           "wing_area_m2": 1.2, "wing_cl": 0.9, "cruise_velocity_mps": 26}
+           "wing_area_m2": 1.2, "wing_cl": 0.9}
         ]
     Only name/num_rotors/base_mass_g are required; everything else falls
     back to VehicleType's defaults (wingless, standard drag/arm constants).
@@ -459,15 +547,72 @@ def wing_lift_n(vehicle: VehicleType, velocity_mps: float) -> float:
     return 0.5 * RHO_AIR * vehicle.wing_cl * vehicle.wing_area_m2 * velocity_mps * velocity_mps
 
 
-def _effective_area_at(thrust_n: float, weight_n: float, base_area_m2: float, lift_fn, v: float) -> float:
+def parasite_drag_area_m2(vehicle: VehicleType) -> float:
+    """The wing's zero-lift drag (parasite_cd0 * wing_area_m2, the real
+    physical parasite drag force at a given v) re-expressed as an
+    *equivalent area at vehicle.drag_cd* -- dividing by drag_cd converts it
+    into the same units _effective_area_at()'s tilt-inflated frontal area is
+    already in, so the two can just be added together and multiplied by the
+    one shared drag_cd everywhere that already happens (kk = 0.5*rho*cd*
+    area/mass, in several places). Zero whenever wing_area_m2 is 0."""
+    return vehicle.parasite_cd0 * vehicle.wing_area_m2 / vehicle.drag_cd
+
+
+def _resolved_body_length_m(vehicle: VehicleType, cfg: MotorPropConfig) -> float:
+    """vehicle.body_length_m if set, else a crude nose-to-tail estimate (2
+    prop diameters) -- good enough for dynamics_6dof.py's coarse
+    inertia/torque estimates. See VehicleType.body_length_m."""
+    if vehicle.body_length_m > 0.0:
+        return vehicle.body_length_m
+    return 2.0 * cfg.prop_diameter_in * 0.0254
+
+
+def _resolved_wing_span_m(vehicle: VehicleType) -> float:
+    """vehicle.wing_span_m if set, else sqrt(6 * wing_area_m2) (AR=6
+    assumed). See VehicleType.wing_span_m."""
+    if vehicle.wing_span_m > 0.0:
+        return vehicle.wing_span_m
+    if vehicle.wing_area_m2 <= 0.0:
+        return 0.0
+    return math.sqrt(6.0 * vehicle.wing_area_m2)
+
+
+def _effective_area_at(thrust_n: float, weight_n: float, base_area_m2: float, lift_fn, v: float,
+                        parasite_area_m2: float = 0.0) -> float:
     """Frontal area inflated by the forward tilt needed to support
     (weight - wing lift) at this velocity, i.e. how much of total thrust
-    magnitude is left over to push horizontally."""
+    magnitude is left over to push horizontally -- plus a fixed parasite-drag
+    area (see parasite_drag_area_m2()) that doesn't scale with tilt the way
+    the prop/frame frontal area does, since it's the wing's own drag, not
+    the rotors'."""
     effective_weight_n = max(weight_n - lift_fn(v), 0.0)
     thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - effective_weight_n * effective_weight_n, 0.0))
-    if thrust_horizontal_n <= 0:
-        return base_area_m2
-    return base_area_m2 * (thrust_n / thrust_horizontal_n)
+    tilt_area = base_area_m2 * (thrust_n / thrust_horizontal_n) if thrust_horizontal_n > 0 else base_area_m2
+    return tilt_area + parasite_area_m2
+
+
+def _equilibrium_velocity(thrust_n: float, weight_n: float, base_area_m2: float, cd: float, lift_fn,
+                           parasite_area_m2: float = 0.0) -> float:
+    """Steady forward speed a throttle setting settles at: drag equals the
+    horizontal thrust left over after supporting (weight - wing lift).
+    Returns 0.0 if the vehicle can't hold itself up and push at all."""
+    def excess_thrust(v: float) -> float:
+        area = _effective_area_at(thrust_n, weight_n, base_area_m2, lift_fn, v, parasite_area_m2)
+        effective_weight_n = max(weight_n - lift_fn(v), 0.0)
+        thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - effective_weight_n * effective_weight_n, 0.0))
+        return thrust_horizontal_n - 0.5 * RHO_AIR * cd * area * v * v
+
+    if excess_thrust(0.0) <= 0:
+        return 0.0
+    # At v_hi, drag on the *un*-inflated, no-parasite area alone already
+    # exceeds full thrust, and the real drag area (tilt-inflated, plus any
+    # parasite term) is only ever >= that while thrust_horizontal is <=
+    # thrust_n -- so excess is negative there for any lift_fn/parasite_area.
+    # (The 1.05 is what makes it strictly negative rather than exactly zero
+    # in the fully-winged, zero-parasite case, where lift carries all the
+    # weight and the area isn't inflated at all.)
+    v_hi = 1.05 * math.sqrt(2 * thrust_n / (RHO_AIR * cd * base_area_m2))
+    return brentq(excess_thrust, 0.0, v_hi)
 
 
 def _log_cosh(x: float) -> float:
@@ -517,55 +662,6 @@ def _accel_phase_closed_form(a0: float, kk: float, v0: float, v_target: float, d
     return t, x, v
 
 
-def _accel_phase_numeric(thrust_n: float, weight_n: float, base_area_m2: float, cd: float,
-                          mass_kg: float, lift_fn, v0: float, v_target: float, distance_cap: float):
-    """Numeric fallback for winged vehicles: wing lift makes thrust_horizontal
-    (and the tilt-inflated drag area) a function of v, so dv/dt is no longer
-    the simple Riccati form the closed-form solver handles."""
-    effective_weight0 = max(weight_n - lift_fn(v0), 0.0)
-    if math.sqrt(max(thrust_n * thrust_n - effective_weight0 * effective_weight0, 0.0)) <= 0:
-        return None
-
-    def rhs(_t, state):
-        _x, v = state
-        effective_weight_n = max(weight_n - lift_fn(v), 0.0)
-        thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - effective_weight_n * effective_weight_n, 0.0))
-        area = base_area_m2 * (thrust_n / thrust_horizontal_n) if thrust_horizontal_n > 0 else base_area_m2
-        drag_n = 0.5 * RHO_AIR * cd * area * v * v
-        return [v, (thrust_horizontal_n - drag_n) / mass_kg]
-
-    def hit_target_v(_t, state):
-        return state[1] - v_target
-
-    hit_target_v.terminal = True
-    hit_target_v.direction = 1
-
-    def hit_distance(_t, state):
-        return state[0] - distance_cap
-
-    hit_distance.terminal = True
-    hit_distance.direction = 1
-
-    sol = solve_ivp(rhs, [0.0, 300.0], [0.0, v0], events=[hit_target_v, hit_distance],
-                     max_step=0.5, rtol=1e-7, atol=1e-9)
-    if sol.t_events[0].size == 0 and sol.t_events[1].size == 0:
-        return None  # stalled: never reached cruise speed or the distance cap
-    return sol.t[-1], sol.y[0, -1], sol.y[1, -1]
-
-
-def _accel_phase(thrust_n: float, weight_n: float, base_area_m2: float, cd: float, mass_kg: float,
-                  lift_fn, has_wing: bool, v0: float, v_target: float, distance_cap: float):
-    if not has_wing:
-        thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - weight_n * weight_n, 0.0))
-        if thrust_horizontal_n <= 0:
-            return None
-        effective_area = base_area_m2 * (thrust_n / thrust_horizontal_n)
-        kk = 0.5 * RHO_AIR * cd * effective_area / mass_kg
-        a0 = thrust_horizontal_n / mass_kg
-        return _accel_phase_closed_form(a0, kk, v0, v_target, distance_cap)
-    return _accel_phase_numeric(thrust_n, weight_n, base_area_m2, cd, mass_kg, lift_fn, v0, v_target, distance_cap)
-
-
 def _decel_phase(kk: float, v0: float, v_floor: float, distance_cap: float):
     """Closed-form solve of dv/dt = -kk*v^2 (drag only, thrust off), stopping
     at v reaching v_floor or distance reaching distance_cap. Unaffected by
@@ -589,6 +685,43 @@ def _decel_phase(kk: float, v0: float, v_floor: float, distance_cap: float):
     v = v0 / (1 + kk * v0 * t)
     x = math.log(1 + kk * v0 * t) / kk
     return t, x, v
+
+
+def _decel_phase_powered(a0: float, kk: float, v0: float, v_floor: float, distance_cap: float):
+    """Closed-form solve of dv/dt = -(a0 + kk*v^2): braking thrust plus drag,
+    both decelerating (mirror of the accel phase's a0 - kk*v^2, thrust now
+    pointed the other way). Stops at v reaching v_floor or distance reaching
+    distance_cap.
+
+    Replaces flying the decel leg as a pure unpowered coast (_decel_phase
+    above): a VTOL can brake with its rotors, and coasting on drag alone had
+    no floor on how long the tail takes -- both the time and distance to
+    reach v_floor scale as 1/kk, so a LOWER-drag vehicle took LONGER to
+    finish a leg, backwards for a model whose whole point is now "as
+    efficient as possible". a0 here comes from the same thrust magnitude
+    used to reach cruise speed, tilted the other way, so a wingless vehicle
+    decelerates exactly as fast as it accelerated."""
+    if v0 <= v_floor:
+        return 0.0, 0.0, v0
+    if a0 <= 0:
+        return _decel_phase(kk, v0, v_floor, distance_cap)  # no braking thrust available -- fall back to coasting
+
+    if kk <= 0:
+        x_floor = (v0 * v0 - v_floor * v_floor) / (2 * a0)
+        if x_floor <= distance_cap:
+            return (v0 - v_floor) / a0, x_floor, v_floor
+        v = math.sqrt(v0 * v0 - 2 * a0 * distance_cap)
+        return (v0 - v) / a0, distance_cap, v
+
+    b = math.sqrt(a0 / kk)
+    x_floor = math.log((a0 + kk * v0 * v0) / (a0 + kk * v_floor * v_floor)) / (2 * kk)
+    if x_floor <= distance_cap:
+        t_floor = (math.atan(v0 / b) - math.atan(v_floor / b)) / (kk * b)
+        return t_floor, x_floor, v_floor
+
+    v = math.sqrt(max((a0 + kk * v0 * v0) * math.exp(-2 * kk * distance_cap) - a0, 0.0) / kk)
+    t = (math.atan(v0 / b) - math.atan(v / b)) / (kk * b)
+    return t, distance_cap, v
 
 
 # ---------------------------------------------------------------------------
@@ -645,28 +778,73 @@ def segment(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery,
     base_area = frontal_area_m2(vehicle, cfg)
     has_wing = vehicle.wing_area_m2 > 0
     lift_fn = (lambda v: wing_lift_n(vehicle, v)) if has_wing else (lambda _v: 0.0)
+    parasite_area = parasite_drag_area_m2(vehicle)  # 0.0 for a wingless vehicle
 
-    accel = _accel_phase(thrust_n, weight_n, base_area, vehicle.drag_cd, mass_kg, lift_fn, has_wing,
-                          v0=1.0, v_target=vehicle.cruise_velocity_mps, distance_cap=distance_m / 2)
-    if accel is None:
+    v_eq = _equilibrium_velocity(thrust_n, weight_n, base_area, vehicle.drag_cd, lift_fn, parasite_area)
+    if v_eq <= 1.0:  # can't out-accelerate its own drag past the 1 m/s start
         return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
-    t_acc, x_acc, v_cruise = accel
+    # Governed: capped at max_speed_mps even if drag alone would equilibrate
+    # higher (real aircraft don't fly at whatever a bare thrust/drag balance
+    # says -- there's a structural/control-authority/regulatory speed limit).
+    v_target = min(CRUISE_V_FRACTION * v_eq, vehicle.max_speed_mps)
 
-    # Coast/decel is unpowered drag only; use the tilt-area as of hand-off
-    # speed (equals the constant accel-phase area when there's no wing).
-    # Note: this decel phase's average speed while decaying from v_cruise
-    # down to the 1 m/s floor is independent of drag by construction (both
-    # its distance and duration scale as 1/kk, so their ratio doesn't), so
-    # less drag here doesn't cover more ground -- it just stretches the
-    # slow tail. That can make a lower-drag (e.g. winged) vehicle spend
-    # more of the leg at this phase's low average speed, not less.
-    decel_area = _effective_area_at(thrust_n, weight_n, base_area, lift_fn, v_cruise)
-    kk_decel = 0.5 * RHO_AIR * vehicle.drag_cd * decel_area / mass_kg
-    t_dec, x_dec, _v_end = _decel_phase(kk_decel, v_cruise, v_floor=1.0, distance_cap=distance_m / 2)
+    if has_wing:
+        # Tailsitter transition: real quaternion 6DOF attitude integration
+        # instead of the tilt-area trick (see dynamics_6dof.py and
+        # docs/superpowers/specs/2026-09-15-quaternion-6dof-transition-design.md).
+        body_length_m = _resolved_body_length_m(vehicle, cfg)
+        wing_span_m = _resolved_wing_span_m(vehicle)
+        inertia_kg_m2 = vehicle.inertia_kg_m2 or dynamics_6dof.estimate_inertia_kg_m2(
+            mass_kg, body_length_m, wing_span_m)
+        thrust_min_n = cfg.thrust_g(THROTTLE_MIN) / 1000.0 * G
+        thrust_max_n = cfg.thrust_g(THROTTLE_MAX) / 1000.0 * G
+        max_torque_n_m = vehicle.max_control_torque_n_m or dynamics_6dof.estimate_max_torque_n_m(
+            thrust_min_n, thrust_max_n, body_length_m, wing_span_m)
+
+        accel = dynamics_6dof.transition_accel(
+            mass_kg=mass_kg, weight_n=weight_n, thrust_n=thrust_n, drag_cd=vehicle.drag_cd,
+            base_area_m2=base_area, lift_fn=lift_fn, parasite_area_m2=parasite_area,
+            inertia_kg_m2=inertia_kg_m2, max_torque_n_m=max_torque_n_m,
+            kp=vehicle.attitude_kp, kd=vehicle.attitude_kd,
+            v0=1.0, v_target=v_target, distance_cap=distance_m / 2)
+        if accel is None:
+            return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+        t_acc, x_acc, v_cruise = accel
+
+        decel = dynamics_6dof.transition_decel(
+            mass_kg=mass_kg, weight_n=weight_n, thrust_n=thrust_n, drag_cd=vehicle.drag_cd,
+            base_area_m2=base_area, lift_fn=lift_fn, parasite_area_m2=parasite_area,
+            inertia_kg_m2=inertia_kg_m2, max_torque_n_m=max_torque_n_m,
+            kp=vehicle.attitude_kp, kd=vehicle.attitude_kd,
+            v0=v_cruise, v_floor=1.0, distance_cap=distance_m / 2)
+        if decel is None:
+            return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+        t_dec, x_dec, _v_end = decel
+    else:
+        # Wingless multirotor: unchanged closed-form path.
+        thrust_horizontal_n = math.sqrt(max(thrust_n * thrust_n - weight_n * weight_n, 0.0))
+        if thrust_horizontal_n <= 0:
+            return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+        effective_area = base_area * (thrust_n / thrust_horizontal_n)
+        kk = 0.5 * RHO_AIR * vehicle.drag_cd * effective_area / mass_kg
+        a0 = thrust_horizontal_n / mass_kg
+        accel = _accel_phase_closed_form(a0, kk, v0=1.0, v_target=v_target, distance_cap=distance_m / 2)
+        if accel is None:
+            return INFEASIBLE_TIME_S, INFEASIBLE_ENERGY_MAH
+        t_acc, x_acc, v_cruise = accel
+
+        decel_area = _effective_area_at(thrust_n, weight_n, base_area, lift_fn, v_cruise, parasite_area)
+        kk_decel = 0.5 * RHO_AIR * vehicle.drag_cd * decel_area / mass_kg
+        effective_weight_cruise_n = max(weight_n - lift_fn(v_cruise), 0.0)
+        thrust_horizontal_decel_n = math.sqrt(
+            max(thrust_n * thrust_n - effective_weight_cruise_n * effective_weight_cruise_n, 0.0))
+        a0_decel = thrust_horizontal_decel_n / mass_kg
+        t_dec, x_dec, _v_end = _decel_phase_powered(a0_decel, kk_decel, v_cruise, v_floor=1.0,
+                                                      distance_cap=distance_m / 2)
 
     # Energy uses the cruise-throttle current for both phases, matching the
     # original's assumption that throttle (and so current draw) is held
-    # constant rather than reduced while coasting down.
+    # constant rather than reduced while braking down.
     energy_mah = amps_ma * ((t_acc + t_dec) / 3600.0)
 
     if x_acc + x_dec >= distance_m:
@@ -728,6 +906,18 @@ def mission(vehicle: VehicleType, cfg: MotorPropConfig, battery: Battery,
         total_time += t
         total_energy += e
 
+    # Feasibility is checked against the battery's rated capacity_mah flat, regardless of
+    # discharge rate. Checked against literature: Peukert's law (capacity derating at high
+    # discharge current) is a lead-acid phenomenon that barely applies to Li-ion/LiPo at
+    # drone-relevant C-rates (Peukert exponents for Li-ion are close to 1, i.e. rate-
+    # independent, per Chen et al., "A Critical Review of Using the Peukert Equation... for
+    # Lithium-Ion Cells," J. Electrochem. Soc. 2020) -- so this flat-capacity model is fine
+    # on that count. The real unmodeled effect is different: terminal-voltage sag under load
+    # (V_drop = I * internal_resistance) can trip a fixed-voltage cutoff before the rated mAh
+    # is drawn, leaving perhaps 10-30% of rated capacity unusable at high C-rate or on an
+    # aged/high-resistance pack (hobbyist-sourced estimate, not a controlled study -- treat
+    # as an order-of-magnitude caveat). Modeling that properly needs per-pack internal-
+    # resistance data this project doesn't have; not fixed here.
     feasible = (not infeasible) and total_energy <= battery.capacity_mah
     return total_time, total_energy, feasible
 
@@ -810,9 +1000,17 @@ def run(data_dir: str, payload_lb: float = DEFAULT_PAYLOAD_LB, grid_step: float 
     for vehicle in vehicle_types:
         for cfg in configs:
             # A motor's thrust/current curve was measured at one specific
-            # voltage; pair it only with a battery of that same cell count
-            # rather than extrapolating performance across voltages.
-            compatible_batteries = [b for b in batteries if b.cells_s == cfg.cells_s]
+            # voltage; pair it with a battery of that same cell count, or
+            # auto series-stack several of a lower-cells_s battery to reach
+            # it (see series_stack_battery()) -- stacking only goes up, since
+            # splitting a pack down to a lower voltage needs a regulator this
+            # model doesn't have.
+            compatible_batteries = []
+            for b in batteries:
+                if b.cells_s == cfg.cells_s:
+                    compatible_batteries.append(b)
+                elif cfg.cells_s > b.cells_s and cfg.cells_s % b.cells_s == 0:
+                    compatible_batteries.append(series_stack_battery(b, cfg.cells_s // b.cells_s))
             skipped_voltage_mismatch += len(batteries) - len(compatible_batteries)
             for battery in compatible_batteries:
                 airframe_g = airframe_mass_g(vehicle, cfg)
@@ -891,23 +1089,61 @@ def plot_results(df: pd.DataFrame, out_prefix: str | None):
     ax2.axhline(0, color="#898781", linewidth=0.8)
     fig2.tight_layout()
 
-    fig3, ax3 = plt.subplots(figsize=(7, 6))
-    for feasible, color, label in [(True, GOOD_COLOR, "Feasible"), (False, CRITICAL_COLOR, "Infeasible")]:
-        sub = df[df.mission_feasible == feasible]
-        ax3.scatter(sub.total_mass_g / 1000.0, sub.hover_time_min, color=color, label=label, s=25, alpha=0.7)
-    ax3.set_title(f"Hover Time vs Total Mass (all {len(df)} configurations)")
-    ax3.set_xlabel("Total Mass (kg)")
-    ax3.set_ylabel("Hover Time (minutes)")
-    ax3.legend()
-    ax3.grid(True, color="#e1e0d9")
-    fig3.tight_layout()
+    import plotly.graph_objects as go
+
+    # Each view is (title, x-column-expr, y-column-expr, z-column-expr, axis titles).
+    # Buttons restyle x/y/z on the existing traces instead of rebuilding the figure.
+    views = [
+        ("Mass / Energy / Hover", lambda d: d.total_mass_g / 1000.0, lambda d: d.mission_total_energy_mah,
+         lambda d: d.hover_time_min, "Total Mass (kg)", "Mission Energy (mAh)", "Hover Time (minutes)"),
+        ("Mass / Hover / Cost", lambda d: d.total_mass_g / 1000.0, lambda d: d.hover_time_min,
+         lambda d: d.total_cost_usd, "Total Mass (kg)", "Hover Time (minutes)", "Total Cost (USD)"),
+        ("Energy / Hover / Cost", lambda d: d.mission_total_energy_mah, lambda d: d.hover_time_min,
+         lambda d: d.total_cost_usd, "Mission Energy (mAh)", "Hover Time (minutes)", "Total Cost (USD)"),
+    ]
+    splits = [(True, GOOD_COLOR, "Feasible"), (False, CRITICAL_COLOR, "Infeasible")]
+    subs = [df[df.mission_feasible == feasible] for feasible, _, _ in splits]
+
+    fig3 = go.Figure()
+    for sub, (_, color, label) in zip(subs, splits):
+        title, xf, yf, zf, *_ = views[0]
+        fig3.add_trace(go.Scatter3d(
+            x=xf(sub), y=yf(sub), z=zf(sub),
+            mode="markers", name=label,
+            marker=dict(size=4, color=color, opacity=0.7),
+            customdata=sub[["vehicle", "motor_model", "battery"]].values,
+            hovertemplate="%{customdata[0]}<br>%{customdata[1]} / %{customdata[2]}"
+                          "<br>x=%{x:.2f}  y=%{y:.2f}  z=%{z:.2f}<extra></extra>",
+        ))
+
+    buttons = []
+    for title, xf, yf, zf, xlabel, ylabel, zlabel in views:
+        buttons.append(dict(
+            label=title, method="update",
+            args=[
+                {"x": [xf(sub) for sub in subs], "y": [yf(sub) for sub in subs], "z": [zf(sub) for sub in subs]},
+                {"title": f"{title} (all {len(df)} configurations)",
+                 "scene.xaxis.title": xlabel, "scene.yaxis.title": ylabel, "scene.zaxis.title": zlabel},
+            ],
+        ))
+    fig3.update_layout(
+        title=f"{views[0][0]} (all {len(df)} configurations)",
+        scene=dict(xaxis_title=views[0][4], yaxis_title=views[0][5], zaxis_title=views[0][6]),
+        updatemenus=[dict(buttons=buttons, active=0, x=0.02, y=1.08, xanchor="left", showactive=True)],
+    )
 
     if out_prefix:
         fig1.savefig(f"{out_prefix}_best_hover_by_vehicle.png", bbox_inches="tight", dpi=150)
         fig2.savefig(f"{out_prefix}_best_energy_margin_by_vehicle.png", bbox_inches="tight", dpi=150)
-        fig3.savefig(f"{out_prefix}_hover_vs_mass_tradespace.png", bbox_inches="tight", dpi=150)
+        # include_plotlyjs="cdn" instead of the default True: the default inlines
+        # the whole ~4.5MB plotly.js bundle into the file, dwarfing the actual
+        # data (a few hundred KB for thousands of rows). Loading it from a CDN
+        # instead needs network access to view the file, but drops it to a
+        # fraction of the size.
+        fig3.write_html(f"{out_prefix}_hover_vs_mass_tradespace.html", include_plotlyjs="cdn")
     else:
         plt.show()
+        fig3.show()
 
 
 def _prompt(message: str, default: str = "") -> str:

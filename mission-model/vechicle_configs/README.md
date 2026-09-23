@@ -72,3 +72,123 @@ Every one of these is a labeled assumption for visualization purposes, not
 a claim about original design intent. Re-run wing_optimizer.py yourself with
 real inputs (and --geometry-out vechicle_configs/wing_geometry.json) to
 replace any of these 18 records with the actual answer.
+
+## 2026-09-12: per-size max_speed_mps (cruise-speed validation follow-up)
+
+Every TailSitter variant previously shared Mission_Model.py's flat
+`DEFAULT_MAX_SPEED_MPS` (18.0), despite spanning a real wing-area range
+(2.84-5.09 m^2, wing_loading_kg_m2 21.5-25.4 per wing_geometry.json). A
+validation pass against two real production tailsitters -- Wingtra
+WingtraOne (16 m/s cruise) and Quantum Systems Trinity F90+ (17 m/s cruise)
+-- found 18 m/s a good match for *that* weight class, but those are ~5kg
+mapping drones, 8-40x lighter than this lineup's 39-193kg gross TailSitter
+configs; no commercial tailsitter exists at this project's weight/payload
+class to check against directly.
+
+Rather than invent per-size numbers with no source, each variant's cap is
+now derived from the same physics the 18 m/s reference itself rests on --
+cruise speed scales as sqrt(wing_loading) at a fixed lift coefficient (from
+L = 0.5*rho*Cl*S*V^2) -- anchored to the Compact tier's wing loading
+(21.469 kg/m^2, closest to the two validated real reference aircraft):
+
+    max_speed_mps = 18.0 * sqrt(wing_loading_kg_m2 / 21.469)
+
+  - **Compact** (21.469 kg/m^2): 18.0 m/s (unchanged -- this is the
+    reference point)
+  - **Balanced** (23.421 kg/m^2): 18.8 m/s
+  - **Big** (25.373 kg/m^2): 19.6 m/s
+
+The spread is modest (~9%) because this lineup's own wing-loading range is
+modest -- this isn't claiming these are the *real* rated speeds for a
+100+kg-payload tailsitter (no such aircraft exists to check against), only
+that varying the cap by the same relationship that validated the baseline
+is more honest than one flat constant across a real size range.
+
+## 2026-09-14: re-sized all 3 wing tiers with wing_optimizer.py's new --objective combined
+
+wing_optimizer.py gained a third objective (`combined`): instead of fixing
+cl and searching aspect ratio for minimum structural mass (`mass`, today's
+prior default -- always bottoms out at `--min-ar` without a span cap) or
+searching cl+AR for minimum drag alone (`drag`), it searches cl+AR jointly
+for minimum *total mission energy* (hover induced-power + cruise drag
+energy), so the optimum lands on a real interior tradeoff instead of a
+search-range boundary. Full method in wing_optimizer.py's docstring and
+`optimize_wing_combined()`.
+
+Re-ran it for all 3 tiers (Compact/Balanced/Big -- Contra/Quad/Bicopter
+share identical wing geometry within a tier, unchanged from before) with:
+
+- `--cruise-mps` = each tier's existing `max_speed_mps` (18.0/18.8/19.6),
+  not the old 25 m/s placeholder -- sizes the wing for the speed the
+  vehicle is actually governed to fly at in Mission_Model.py's sim, not a
+  faster speed it never reaches. This is the single biggest driver of the
+  area increase below (required area scales as 1/v^2).
+- `--hover-s 0`: Mission_Model.py's mission has no sustained hover/loiter
+  phase (just 3 quick vertical takeoff/landing transitions at fixed
+  climb/descent speeds -- see MISSION_LEGS), so there's no real number to
+  put here; 0 means this re-sizing is really pure drag-minimization for
+  these vehicles specifically, with `--objective combined`'s machinery
+  wired in for a future mission profile that does have a real hover budget.
+  `--disk-loading-kg-m2` was left at its default (irrelevant with
+  hover_s=0).
+- `--cl-min 0.3 --cl-max 1.0 --min-ar 4 --max-ar 12`: `min_ar`/`drag_cd`/
+  `max_speed_mps`/`arm_mass_g` unchanged from the existing lineup;
+  `max_ar` kept <=12, comfortably below where oswald_efficiency() goes
+  unphysical (~AR 18.5, see its docstring) -- not re-derived from anything
+  vehicle-specific.
+
+Because the optimal cl/AR for this energy model turn out independent of
+lift_mass_kg and cruise speed (drag_n = lift_n*(parasite_cd0+cdi)/cl, which
+has no v dependence once area is substituted out), all 3 tiers landed on
+the identical cl=0.867, AR=8.64 -- only the resulting area scales with
+each tier's own lift_mass_kg and cruise speed:
+
+| tier     | wing_area_m2  | wing_cl     | wing_loading_kg_m2 | base_mass_g      |
+|----------|---------------|-------------|---------------------|------------------|
+| Compact  | 2.84 -> 3.4753  | 0.55 -> 0.867 | 21.47 -> 17.54    | 14752.3 -> 15326.9 |
+| Balanced | 3.95 -> 4.8339  | 0.6 -> 0.867  | 23.42 -> 19.14    | 15764.6 -> 16541.4 |
+| Big      | 5.09 -> 6.2084  | 0.65 -> 0.867 | 25.37 -> 20.80    | 16763.8 -> 17770.1 |
+
+`max_speed_mps` was deliberately **not** re-derived from the new wing
+loading via the sqrt-scaling formula two sections up: that formula's anchor
+(21.469 kg/m^2 -> 18.0 m/s, from real Wingtra/Trinity F90+ cruise speeds)
+is a real-aircraft calibration point, but plugging the new cl back into it
+turns the relationship into an unstable iteration (each pass shrinks
+toward v=0 instead of converging) once cl no longer matches the value the
+anchor was implicitly taken at. `max_speed_mps` stays pinned to the
+already-validated 18.0/18.8/19.6 m/s.
+
+`base_mass_g` was rescaled using a linear fit (893.9 g per m^2 of wing
+area + 12220.3 g fixed) through the *existing* 3 tiers' own
+base_mass_g-vs-wing_area_m2 relationship (the ~1.5 kg/m^2 figure quoted
+above for that relationship was a rounded description, not the literal
+fitted slope) -- reusing this project's already-committed mass-scaling
+relationship at the new area, not new research into frame mass. This is
+the same kind of ~linear approximation the original relationship already
+was; it hasn't been re-validated against any new comparable aircraft data.
+`arm_mass_g` (rotor-layout-specific, not wing-area-dependent) is unchanged.
+
+`mission_model_results.csv` and the tradespace PNGs/HTML were generated
+against the *old* wing sizing and are now stale for the TailSitter*
+configs -- re-run Mission_Model.py's sweep to refresh them.
+
+## 2026-09-12: parasite_cd0 (wing/fuselage drag, separate from drag_cd)
+
+The same validation pass found the cruise-speed model's *unconstrained*
+equilibrium velocity (before the max_speed_mps governor) came out at
+150-200 m/s for a real feasible TailSitter+motor pairing -- 10x too fast
+for any real aircraft this size. Root cause: Mission_Model.py's drag area
+was only ever the prop/frame frontal area (frontal_area_m2(), inflated by
+thrust tilt) -- a winged vehicle near level cruise, with wings carrying
+most of the weight, got essentially zero drag contribution from the wing
+itself. Added `parasite_cd0` (default 0.045, VehicleType's field
+docstring has the mid-range light-UAV justification) as a wing-area-
+referenced zero-lift drag coefficient, combined with drag_cd's frontal-area
+term in Mission_Model.py's parasite_drag_area_m2(). No vehicle_configs
+entry overrides the default -- 0.045 is a reasonable placeholder pending a
+real source, not a per-airframe measurement. This roughly halves the
+unconstrained equilibrium velocity for this lineup's configs (150-200 m/s
+-> 70-90 m/s) -- still above max_speed_mps, which is expected: these
+motors are sized for hover, not cruise, so real autopilots throttle back
+for cruise too. The governor was never wrong to bind; the bug was that the
+number it was masking was 10x too high rather than ~4-5x.
