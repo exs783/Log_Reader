@@ -745,6 +745,14 @@
             document.getElementById(elId).style.display = 'none';
         }
 
+        // silly goofy anti escape function that might work 
+        // it might not though
+        function escapeHtml(value) {
+            const div = document.createElement('div');
+            div.textContent = String(value);
+            return div.innerHTML;
+        }
+
         // Real backend health check, replacing the old hardcoded "connected" badge.
         async function checkBackendHealth() {
             const dot = document.getElementById('backend-status-dot');
@@ -1530,11 +1538,11 @@
                 html = events.events.map(evt => {
                     let content = '';
                     if (evt.type === 'MODE_CHANGE') {
-                        content = `<strong>Mode Change:</strong> ${evt.value} at ${(evt.timestamp/1e6).toFixed(2)}s`;
+                        content = `<strong>Mode Change:</strong> ${escapeHtml(evt.value)} at ${(evt.timestamp/1e6).toFixed(2)}s`;
                     } else if (evt.type === 'ERROR') {
                         content = `<strong>Error:</strong> Subsys ${evt.subsystem}, Code ${evt.error_code} at ${(evt.timestamp/1e6).toFixed(2)}s`;
                     } else if (evt.type === 'FAILSAFE') {
-                        content = `<strong>Failsafe:</strong> ${evt.message} at ${(evt.timestamp/1e6).toFixed(2)}s`;
+                        content = `<strong>Failsafe:</strong> ${escapeHtml(evt.message)} at ${(evt.timestamp/1e6).toFixed(2)}s`;
                     } else {
                         content = `<strong>${evt.type}:</strong> at ${(evt.timestamp/1e6).toFixed(2)}s`;
                     }
