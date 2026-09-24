@@ -1,7 +1,7 @@
 # Private team log catalog
 
-Status: base catalog spec approved. The text-dump addition is ready for
-written-spec review; implementation and its plan are not yet approved.
+Status: catalog and text-dump design approved through the request to implement
+using subagent-driven development. The implementation plan awaits review.
 
 ## Purpose and agreed scope
 
