@@ -1,7 +1,7 @@
 # Private team log catalog
 
-Status: draft for written-spec review. The conversational design is approved;
-implementation and its plan are not yet approved.
+Status: base catalog spec approved. The text-dump addition is ready for
+written-spec review; implementation and its plan are not yet approved.
 
 ## Purpose and agreed scope
 
@@ -16,8 +16,9 @@ The agreed requirements are:
    opens a naming dialog with an editable timestamp-based default.
 3. Saved logs support freely named folders and subfolders, tags, and plain-text
    notes. Team members can rename and move logs and edit their metadata.
-4. Team members can reopen saved logs for analysis and download their original
-   bytes. Saved logs remain until explicitly deleted.
+4. Team members can reopen saved logs for analysis, download their original
+   bytes or a derived text dump, and view the text in a browser using Ctrl+F.
+   Saved logs remain until explicitly deleted.
 5. Keep the 500 MB request limit and in-memory analysis. Hold the analyzed file
    temporarily on the server for one hour; Save retains that same copy without
    another upload. Sweep expired files every five minutes and at startup.
@@ -50,13 +51,55 @@ The catalog lists saved logs by folder, with name search and tag filtering.
 Each entry supports opening its analysis, editing metadata, moving to another
 folder, downloading, and deleting. Opening reruns the existing analysis;
 analysis results are not persistently cached. Deletion requires confirmation.
-Downloads use the display name plus the original supported extension and
-return the original bytes as an attachment.
+Original downloads use the display name plus the original supported extension
+and return the original bytes as an attachment. Text downloads and browser
+viewing are associated with that same catalog entry, as described below.
 
 Folders can be created under the root or another folder and renamed. Only
 empty folders can be deleted. Moving whole folder trees is deferred; moving a
 log between folders is included. The fixed catalog root cannot be renamed or
 deleted.
+
+## Text dump and browser viewing
+
+Include this small addition in the catalog MVP. Each saved log offers:
+
+1. Download original, returning the unchanged uploaded file.
+2. Download text, returning a `.txt` dump of that log.
+3. View text, opening the dump in a new browser tab for native Ctrl+F or Cmd+F.
+
+Use the installed `mavlogdump` converter's normal text output without
+message-type filtering. Read the original log, not the analysis DataFrames,
+which omit message types. Both text actions use the same conversion path and
+log ID; the text is a derived representation, not another catalog entry.
+No schema changes, upload-time conversion, permanent text copies, or cache
+are needed. Renaming the log changes the suggested download name; deleting
+the original removes the ability to generate its dump.
+
+Generate and stream text on request without assembling the whole dump in
+server memory or a JavaScript Blob. View text navigates directly to a
+same-origin endpoint serving `text/plain; charset=utf-8`, with inline
+disposition and `X-Content-Type-Options: nosniff`. Download text uses attachment
+disposition with a sanitized `.txt` filename. Both use `Cache-Control: no-store`
+and the same password gate as original downloads. Never interpret dump content
+as HTML or insert it into the dashboard DOM.
+
+Keep the original file locked for the lifetime of conversion, release it on
+completion or disconnect, and stop any converter process when the response
+closes. Use fixed converter arguments and the internal file path, never a
+user-supplied shell command. Conversion failure preserves the saved log.
+Reject failures before streaming with an error response; a failure after
+streaming starts must clearly mark the output incomplete rather than silently
+presenting it as a complete dump.
+
+Native browser search is the entire search feature for this MVP. It searches
+loaded text, so users should wait for the dump to finish loading for complete
+results. Show a warning before View text: the dump may be larger than its
+500 MB source limit, and opening or searching it may exhaust browser memory.
+Downloading remains available without opening a text tab. This is an accepted
+MVP limitation, not a guarantee that every allowed log is comfortable to view.
+Conversion also consumes server CPU and occupies a request worker; no job
+queue, custom text viewer, server-side search, or full-text index is included.
 
 ## Temporary-file lifecycle
 
@@ -149,6 +192,8 @@ The HTTP contract is:
    filters. `GET /api/logs/<id>` returns a saved entry's metadata.
 3. `POST /api/logs/<id>/analyze` reruns analysis on a saved file.
    `GET /api/logs/<id>/download` returns its original bytes as an attachment.
+   `GET /api/logs/<id>/text` streams the text dump inline; `?download=1`
+   switches only the disposition to a text attachment. Both require a saved log.
 4. `PATCH /api/logs/<id>` edits metadata or changes folder.
    `DELETE /api/logs/<id>` removes the file and its catalog record.
 5. `GET/POST /api/folders` lists or creates folders;
@@ -223,7 +268,11 @@ feature does not add continuous deployment.
 
 1. Upload a real log, analyze it, then Save with an edited name, folder, tags,
    and notes. Confirm one raw file and one saved record; retrying Save creates
-   no duplicates. Reopen it and download byte-identical contents.
+   no duplicates. Reopen it and download byte-identical original contents.
+   Confirm text view and download match the converter's normal output,
+   including a message type outside the analysis selection, without retaining
+   text files. Check conversion failure and cancellation release resources
+   without deleting the saved log.
 2. Exercise expiration with a controlled clock, Save at the deadline, and
    cleanup competing with Save. Saved files survive; expired unsaved files,
    abandoned processing work, and deletion retries are removed safely.
@@ -232,7 +281,10 @@ feature does not add continuous deployment.
    remain untouched.
 4. Check that unauthenticated public browsing, API access, and downloads are
    denied; authenticated requests succeed. Reject cross-origin writes and
-   render hostile metadata and event messages as inert text in a real browser.
+   render hostile metadata, event messages, and dump contents as inert text in
+   a real browser. Verify View text opens separately, native find locates a
+   known record after loading, and a representative large dump streams through
+   the deployed proxy without silently truncating.
 5. Retain upload size/type and unsafe-filename checks. Restart/rebuild Docker
    and verify saved records and files remain, startup cleanup works, the cron
    sweep runs without site traffic, and healthchecks still pass.
@@ -241,7 +293,8 @@ feature does not add continuous deployment.
 
 Individual accounts, roles, audit trails, threaded comments, automatic log
 naming from flight contents, batch uploads, duplicate-content detection,
-analysis caching, drag-and-drop organization, folder-tree moves, automated
+analysis or text-dump caching, custom text viewers, server-side text search,
+full-text indexing, drag-and-drop organization, folder-tree moves, automated
 backups, storage quotas, and continuous deployment are outside this MVP.
 
 This spec is the design-review artifact. After written-spec approval, prepare
