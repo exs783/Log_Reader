@@ -352,6 +352,45 @@ class CatalogAPITests(unittest.TestCase):
         self.assertEqual(duplicate.get_json()['log'], saved)
         self.assertEqual(sorted(self.store.files.iterdir()), files_before)
 
+    def test_normalized_tag_limit_applies_to_save_edit_and_filter_without_mutation(self):
+        boundary = 'ß' * 20
+        too_long_after_casefold = 'ß' * 21
+        normalized_boundary = 'ss' * 20
+        temporary = self._upload().get_json()
+
+        invalid_save = self.client.post(
+            f"/api/logs/{temporary['log_id']}/save",
+            headers={'Origin': 'http://localhost'},
+            json={'display_name': 'Boundary tag', 'tags': [too_long_after_casefold]},
+        )
+        self.assertEqual(invalid_save.status_code, 400)
+
+        valid_save = self.client.post(
+            f"/api/logs/{temporary['log_id']}/save",
+            headers={'Origin': 'http://localhost'},
+            json={'display_name': 'Boundary tag', 'tags': [boundary]},
+        )
+        self.assertEqual(valid_save.status_code, 200)
+        saved = valid_save.get_json()['log']
+        self.assertEqual(saved['tags'], [normalized_boundary])
+        filtered = self.client.get('/api/logs', query_string={'tag': boundary})
+        self.assertEqual(
+            [log['id'] for log in filtered.get_json()['logs']], [saved['id']]
+        )
+
+        invalid_edit = self.client.patch(
+            f"/api/logs/{saved['id']}",
+            headers={'Origin': 'http://localhost'},
+            json={'tags': [too_long_after_casefold]},
+        )
+        self.assertEqual(invalid_edit.status_code, 400)
+        self.assertEqual(self.store.get(saved['id']), saved)
+        invalid_filter = self.client.get(
+            '/api/logs', query_string={'tag': too_long_after_casefold}
+        )
+        self.assertEqual(invalid_filter.status_code, 400)
+        self.assertEqual(self.store.get(saved['id']), saved)
+
     def test_write_requests_require_same_origin(self):
         for headers in (
             {'Origin': 'https://foreign.example'},

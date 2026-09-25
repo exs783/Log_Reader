@@ -282,7 +282,7 @@ class CatalogStore:
             conditions.append("l.display_name LIKE ? ESCAPE '\\'")
             parameters.append(f'%{escaped}%')
         if tag:
-            normalized_tag = self._name(tag, 40, 'tag').casefold()
+            normalized_tag = self._tag(tag)
             conditions.append(
                 '''EXISTS (
                        SELECT 1 FROM log_tags selected_lt
@@ -606,9 +606,15 @@ class CatalogStore:
             raise CatalogError('Invalid tags', 400)
         normalized: list[str] = []
         for item in value:
-            tag = self._name(item, 40, 'tag').casefold()
+            tag = self._tag(item)
             if tag not in normalized:
                 normalized.append(tag)
+        return normalized
+
+    def _tag(self, value: object) -> str:
+        normalized = self._name(value, 40, 'tag').casefold()
+        if len(normalized) > 40:
+            raise CatalogError('Invalid tag', 400)
         return normalized
 
     def _metadata_for_id(self, log_id: str, *, saved_only: bool = False) -> dict:

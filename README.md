@@ -153,9 +153,17 @@ Use one consistent snapshot procedure:
 
    ```bash
    umask 077
-   test ! -e "$CATALOG_BACKUP_ARCHIVE"
-   sudo tar --numeric-owner -czpf "$CATALOG_BACKUP_ARCHIVE" -C log-dashboard catalog-data
-   sudo tar -tzpf "$CATALOG_BACKUP_ARCHIVE"
+   if [ -z "${CATALOG_BACKUP_ARCHIVE:-}" ] ||
+      [ "${CATALOG_BACKUP_ARCHIVE#/}" = "$CATALOG_BACKUP_ARCHIVE" ]; then
+       echo "Set CATALOG_BACKUP_ARCHIVE to an absolute path." >&2
+       false
+   elif [ -e "$CATALOG_BACKUP_ARCHIVE" ]; then
+       echo "Refusing to overwrite existing archive: $CATALOG_BACKUP_ARCHIVE" >&2
+       false
+   else
+       sudo tar --numeric-owner -czpf "$CATALOG_BACKUP_ARCHIVE" -C log-dashboard catalog-data &&
+       sudo tar -tzpf "$CATALOG_BACKUP_ARCHIVE"
+   fi
    ```
 
 4. Run `docker compose start log-reader`, restore the one marked cron line without

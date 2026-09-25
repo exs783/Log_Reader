@@ -62,6 +62,14 @@
         await refreshCatalog();
     }
 
+    async function openInCatalog() {
+        if (!state.opened) return;
+        byId('catalog-name-filter').value = '';
+        byId('catalog-tag-filter').value = '';
+        byId('catalog-folder-filter').value = String(state.opened.folder_id);
+        await showCatalog();
+    }
+
     function folderName(folderId) {
         const folder = state.folders.find(item => item.id === folderId);
         return folder ? folder.name : 'Unknown folder';
@@ -78,7 +86,7 @@
         state.folders.forEach(folder => {
             const option = document.createElement('option');
             option.value = String(folder.id);
-            option.textContent = folder.name;
+            option.textContent = folderPath(folder.id);
             select.append(option);
         });
     }
@@ -258,7 +266,7 @@
 
     function openSaveDialog() {
         if (state.opened && !state.temporary) {
-            showCatalog();
+            openInCatalog();
             return;
         }
         if (!state.temporary) return;
@@ -304,7 +312,7 @@
             byId('log-dialog').close();
             if (state.editing) {
                 if (state.opened && state.opened.id === data.log.id) opened(data.log);
-                else byId('save-to-catalog').disabled = !state.opened;
+                else byId('save-to-catalog').disabled = !state.temporary && !state.opened;
                 state.editing = null;
                 await refreshCatalog();
             } else {

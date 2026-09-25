@@ -1,3 +1,4 @@
+import io
 import logging
 import threading
 import time
@@ -264,6 +265,39 @@ class CatalogBrowserTests(unittest.TestCase):
         expect(page.locator('#save-to-catalog')).to_be_disabled()
         self.assertEqual(self.store.list_logs(), [])
 
+    def test_editing_saved_log_keeps_new_temporary_save_identity(self):
+        page = self.page
+        page.goto(self.base_url)
+        self.upload(name='saved-a.bin', contents=b'saved A')
+        page.locator('#save-to-catalog').click()
+        page.get_by_label('Log name', exact=True).fill('Saved A')
+        page.get_by_role('button', name='Save log', exact=True).click()
+
+        with page.expect_response(lambda response: response.url.endswith('/api/upload')) as upload:
+            self.upload(name='temporary-b.bin', contents=b'temporary B')
+        temporary_b_id = upload.value.json()['log_id']
+
+        page.get_by_role('button', name='Catalog', exact=True).click()
+        page.locator('.catalog-log', has_text='Saved A').get_by_role(
+            'button', name='Edit log', exact=True
+        ).click()
+        page.get_by_label('Log name', exact=True).fill('Edited A')
+        page.get_by_role('button', name='Save changes', exact=True).click()
+
+        page.get_by_role('button', name='Analyzer', exact=True).click()
+        expect(page.locator('#save-to-catalog')).to_be_enabled()
+        expect(page.locator('#save-to-catalog')).to_have_text('Save to catalog')
+        page.locator('#save-to-catalog').click()
+        page.get_by_label('Log name', exact=True).fill('Saved B')
+        page.get_by_role('button', name='Save log', exact=True).click()
+        expect(page.locator('#save-to-catalog')).to_have_text('Open in catalog')
+
+        self.assertEqual(self.store.get(temporary_b_id)['display_name'], 'Saved B')
+        self.assertEqual(
+            {log['display_name'] for log in self.store.list_logs()},
+            {'Edited A', 'Saved B'},
+        )
+
     def test_saved_log_reanalysis_renders_tabs_and_failure_preserves_catalog_log(self):
         page = self.page
         page_errors = []
@@ -346,7 +380,7 @@ class CatalogBrowserTests(unittest.TestCase):
             })"""),
         )
         log_dialog.get_by_label('Log name', exact=True).fill('Landing run')
-        page.locator('#log-folder').select_option(label='Test flights')
+        page.locator('#log-folder').select_option(label='Logs / Test flights')
         log_dialog.get_by_label('Tags', exact=True).fill('landing')
         page.get_by_role('button', name='Save changes', exact=True).click()
 
@@ -367,7 +401,7 @@ class CatalogBrowserTests(unittest.TestCase):
         page.locator('#catalog-tag-filter').select_option('landing')
         expect(page.locator('#catalog-list')).to_contain_text('Landing run')
         expect(page.locator('#catalog-list')).not_to_contain_text('Hover run')
-        page.locator('#catalog-folder-filter').select_option(label='Test flights')
+        page.locator('#catalog-folder-filter').select_option(label='Logs / Test flights')
         expect(page.locator('#catalog-list')).to_contain_text('Landing run')
         expect(page.locator('#catalog-breadcrumb')).to_have_text('Logs / Test flights')
 
@@ -385,6 +419,89 @@ class CatalogBrowserTests(unittest.TestCase):
         page.once('dialog', lambda dialog: dialog.accept())
         page.get_by_role('button', name='Delete folder', exact=True).click()
         expect(page.locator('#catalog-folder-filter')).not_to_contain_text('Landings')
+
+    def test_duplicate_folder_names_show_paths_and_select_the_intended_ids(self):
+        aircraft_a = self.store.create_folder('Aircraft A')
+        flights_a = self.store.create_folder('Flights', aircraft_a['id'])
+        aircraft_b = self.store.create_folder('Aircraft B')
+        flights_b = self.store.create_folder('Flights', aircraft_b['id'])
+        page = self.page
+        page.goto(self.base_url)
+        page.get_by_role('button', name='Catalog', exact=True).click()
+
+        folder_filter = page.locator('#catalog-folder-filter')
+        folder_filter.select_option(label='Logs / Aircraft B / Flights', timeout=1000)
+        self.assertEqual(folder_filter.input_value(), str(flights_b['id']))
+
+        page.get_by_role('button', name='Create folder', exact=True).click()
+        parent = page.locator('#folder-parent')
+        parent.select_option(label='Logs / Aircraft B / Flights', timeout=1000)
+        self.assertEqual(parent.input_value(), str(flights_b['id']))
+        page.get_by_role('button', name='Cancel', exact=True).click()
+
+        page.get_by_role('button', name='Analyzer', exact=True).click()
+        self.upload(name='nested.bin')
+        page.locator('#save-to-catalog').click()
+        log_folder = page.locator('#log-folder')
+        log_folder.select_option(label='Logs / Aircraft B / Flights', timeout=1000)
+        self.assertEqual(log_folder.input_value(), str(flights_b['id']))
+        page.get_by_label('Log name', exact=True).fill('Nested flight')
+        page.get_by_role('button', name='Save log', exact=True).click()
+        expect(page.locator('#save-to-catalog')).to_have_text('Open in catalog')
+        saved = self.store.list_logs()[0]
+        self.assertEqual(saved['folder_id'], flights_b['id'])
+
+        page.get_by_role('button', name='Catalog', exact=True).click()
+        page.get_by_role('button', name='Edit log', exact=True).click()
+        log_folder.select_option(label='Logs / Aircraft A / Flights', timeout=1000)
+        self.assertEqual(log_folder.input_value(), str(flights_a['id']))
+        page.get_by_role('button', name='Save changes', exact=True).click()
+        expect(page.locator('#catalog-list')).to_contain_text('Nested flight')
+        self.assertEqual(self.store.get(saved['id'])['folder_id'], flights_a['id'])
+
+    def test_open_in_catalog_clears_filters_and_selects_the_log_folder(self):
+        target_folder = self.store.create_folder('Target flights')
+        other_folder = self.store.create_folder('Other flights')
+        other_temporary = self.store.ingest(
+            io.BytesIO(b'other'), 'other.bin', lambda path, name: {'success': True}
+        )[1]
+        self.store.save(other_temporary['id'], {
+            'display_name': 'Other log',
+            'folder_id': other_folder['id'],
+            'tags': ['other'],
+        })
+        page = self.page
+        page.goto(self.base_url)
+        self.upload(name='target.bin', contents=b'target')
+        page.locator('#save-to-catalog').click()
+        page.get_by_label('Log name', exact=True).fill('Target log')
+        page.get_by_label('Tags', exact=True).fill('target')
+        page.locator('#log-folder').select_option(label='Logs / Target flights')
+        page.get_by_role('button', name='Save log', exact=True).click()
+        expect(page.locator('#save-to-catalog')).to_have_text('Open in catalog')
+
+        page.get_by_role('button', name='Catalog', exact=True).click()
+        page.locator('#catalog-name-filter').fill('missing')
+        page.locator('#catalog-tag-filter').select_option('other')
+        page.locator('#catalog-folder-filter').select_option(str(other_folder['id']))
+        expect(page.locator('#catalog-list')).to_contain_text('No saved logs')
+
+        page.get_by_role('button', name='Analyzer', exact=True).click()
+        page.get_by_role('button', name='Open in catalog', exact=True).click()
+        expect(page.locator('#catalog-name-filter')).to_have_value('')
+        expect(page.locator('#catalog-tag-filter')).to_have_value('')
+        expect(page.locator('#catalog-folder-filter')).to_have_value(
+            str(target_folder['id'])
+        )
+        expect(page.locator('#catalog-breadcrumb')).to_have_text('Logs / Target flights')
+        expect(page.locator('#catalog-list')).to_contain_text('Target log')
+
+        page.locator('#catalog-name-filter').fill('missing')
+        expect(page.locator('#catalog-list')).to_contain_text('No saved logs')
+        page.get_by_role('button', name='Analyzer', exact=True).click()
+        page.get_by_role('button', name='Catalog', exact=True).click()
+        expect(page.locator('#catalog-name-filter')).to_have_value('missing')
+        expect(page.locator('#catalog-list')).to_contain_text('No saved logs')
 
     def test_view_text_warns_then_opens_searchable_plain_text_tab(self):
         page = self.page
