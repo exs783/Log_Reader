@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import contextlib
 import datetime as dt
 import fcntl
@@ -708,3 +709,35 @@ class CatalogStore:
             connection.execute('BEGIN IMMEDIATE')
             connection.execute("DELETE FROM logs WHERE id = ? AND status = 'deleting'", (log_id,))
             connection.commit()
+
+
+def _cleanup_command(data_dir: Path) -> int:
+    counts = {'removed': 0, 'skipped': 0, 'failed': 0}
+    try:
+        store = CatalogStore(data_dir)
+        store.initialize()
+        counts = store.cleanup()
+    except Exception:
+        counts['failed'] += 1
+    print(
+        f"removed={counts['removed']} "
+        f"skipped={counts['skipped']} "
+        f"failed={counts['failed']}"
+    )
+    return 1 if counts['failed'] else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser()
+    commands = parser.add_subparsers(dest='command', required=True)
+    cleanup = commands.add_parser('cleanup')
+    cleanup.add_argument('--data-dir', type=Path, required=True)
+    arguments = parser.parse_args(argv)
+    if arguments.command == 'cleanup':
+        return _cleanup_command(arguments.data_dir)
+    parser.error('unknown command')
+    return 2
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

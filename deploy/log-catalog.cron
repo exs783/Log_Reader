@@ -1,0 +1,1 @@
+*/5 * * * * cd /home/willis/projects/log_reading_summer_26 && /usr/bin/docker compose exec -T log-reader python catalog.py cleanup --data-dir /app/catalog-data # log-catalog-cleanup
