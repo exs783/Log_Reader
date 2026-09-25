@@ -1,12 +1,22 @@
 import io
+import subprocess
+import sys
+import sysconfig
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from catalog import CatalogStore
 from catalog_routes import init_catalog
 import python_backend
+
+
+DATAFLASH_TEXT = (
+    b'FMT, 128, 89, FMT, BBnNZ, Type,Length,Name,Format,Columns\n'
+    b'FMT, 129, 15, TEST, Qf, TimeUS,Value\n'
+    b'TEST, 1000000, 42.5\n'
+)
 
 
 class CatalogAPITests(unittest.TestCase):
@@ -81,6 +91,12 @@ class CatalogAPITests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return response.get_json()['log']
 
+    def _save_text(self, display_name: str = 'Text sample') -> dict:
+        _, temporary = self.store.ingest(
+            io.BytesIO(DATAFLASH_TEXT), 'sample.log', lambda path, name: {'success': True}
+        )
+        return self.store.save(temporary['id'], {'display_name': display_name})
+
     def test_upload_save_and_original_download(self):
         with patch.object(self.backend, 'run_analysis', return_value={
             'success': True, 'filename': 'flight.bin',
@@ -110,6 +126,95 @@ class CatalogAPITests(unittest.TestCase):
         self.assertEqual(download.headers['Cache-Control'], 'no-store')
         self.assertEqual(download.headers['X-Content-Type-Options'], 'nosniff')
         download.close()
+
+    def test_view_is_plain_text_and_download_has_same_contents(self):
+        saved = self._save_text()
+        route = f"/api/logs/{saved['id']}/text"
+
+        view = self.client.get(route)
+        download = self.client.get(route + '?download=1')
+
+        self.assertEqual(view.status_code, 200)
+        self.assertEqual(view.mimetype, 'text/plain')
+        self.assertEqual(view.headers['X-Content-Type-Options'], 'nosniff')
+        self.assertIn(b'TEST', view.data)
+        self.assertEqual(view.data, download.data)
+        self.assertIn('inline', view.headers['Content-Disposition'])
+        self.assertIn('attachment', download.headers['Content-Disposition'])
+        with self.store.use_file(saved['id']) as (path, _):
+            converter = Path(sysconfig.get_path('scripts')) / 'mavlogdump.py'
+            expected = subprocess.check_output(
+                [sys.executable, '-u', str(converter), str(path)],
+                stderr=subprocess.DEVNULL,
+            )
+        self.assertEqual(view.data, expected)
+        view.close()
+        download.close()
+
+    def test_text_stream_releases_file_on_exhaustion_and_early_close(self):
+        exhausted = self._save_text('Exhausted')
+        response = self.client.get(f"/api/logs/{exhausted['id']}/text")
+        self.assertIn(b'TEST', response.data)
+        deleted = self.client.delete(
+            f"/api/logs/{exhausted['id']}", headers={'Origin': 'http://localhost'}
+        )
+        self.assertEqual(deleted.status_code, 200)
+        response.close()
+
+        cancelled = self._save_text('Cancelled')
+        response = self.client.get(
+            f"/api/logs/{cancelled['id']}/text", buffered=False
+        )
+        blocked = self.client.delete(
+            f"/api/logs/{cancelled['id']}", headers={'Origin': 'http://localhost'}
+        )
+        self.assertEqual(blocked.status_code, 409)
+        response.close()
+        deleted = self.client.delete(
+            f"/api/logs/{cancelled['id']}", headers={'Origin': 'http://localhost'}
+        )
+        self.assertEqual(deleted.status_code, 200)
+
+    def test_text_conversion_failure_returns_500_and_preserves_source(self):
+        saved = self._save_text()
+        process = Mock()
+        process.stdout = io.BytesIO()
+        process.wait.return_value = 2
+        process.poll.return_value = 2
+
+        with self.assertLogs(self.backend.app.logger.name, level='ERROR'):
+            with patch('log_text.subprocess.Popen', return_value=process):
+                response = self.client.get(f"/api/logs/{saved['id']}/text")
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.get_json(), {'error': 'Catalog request failed'})
+        download = self.client.get(f"/api/logs/{saved['id']}/download")
+        self.assertEqual(download.data, DATAFLASH_TEXT)
+        download.close()
+
+    def test_failed_text_tail_and_html_looking_output_remain_plain_bytes(self):
+        saved = self._save_text()
+        process = Mock()
+        process.stdout.read.side_effect = [b'<script>alert(1)</script>', b'']
+        process.wait.return_value = 3
+        process.poll.return_value = 3
+
+        with self.assertLogs('log_text', level='ERROR'):
+            with patch('log_text.subprocess.Popen', return_value=process):
+                response = self.client.get(f"/api/logs/{saved['id']}/text")
+                payload = response.data
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, 'text/plain')
+        self.assertEqual(response.headers['X-Content-Type-Options'], 'nosniff')
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        self.assertEqual(response.headers['X-Accel-Buffering'], 'no')
+        self.assertEqual(
+            payload,
+            b'<script>alert(1)</script>'
+            b'\n[TEXT DUMP INCOMPLETE: conversion failed]\n',
+        )
+        response.close()
 
     def test_log_folder_crud_and_filters(self):
         folder_response = self.client.post(

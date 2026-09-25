@@ -4,13 +4,15 @@ import os
 from contextlib import ExitStack
 from functools import wraps
 from pathlib import Path
-from typing import Callable, ParamSpec, cast
+from typing import Callable, Iterator, ParamSpec, cast
 
-from flask import Flask, current_app, jsonify, request, send_file
+from flask import Flask, Response, current_app, jsonify, request, send_file
 from flask.typing import ResponseReturnValue
+from werkzeug.http import dump_options_header
 from werkzeug.utils import secure_filename
 
 from catalog import CatalogError, CatalogStore
+from log_text import TextDump, open_text_dump
 
 
 P = ParamSpec('P')
@@ -61,6 +63,13 @@ def _only_fields(value: dict, allowed: set[str]) -> dict:
     if not set(value).issubset(allowed):
         raise CatalogError('Invalid request field', 400)
     return value
+
+
+def _stream_dump(dump: TextDump, stack: ExitStack) -> Iterator[bytes]:
+    try:
+        yield from dump
+    finally:
+        stack.close()
 
 
 def register_catalog_routes(
@@ -155,6 +164,31 @@ def register_catalog_routes(
             response.call_on_close(stack.close)
             response.headers['Cache-Control'] = 'no-store'
             response.headers['X-Content-Type-Options'] = 'nosniff'
+            return response
+        except BaseException:
+            stack.close()
+            raise
+
+    @app.get('/api/logs/<log_id>/text')
+    @_catalog_errors
+    def text_log(log_id: str) -> ResponseReturnValue:
+        stack = ExitStack()
+        try:
+            path, metadata = stack.enter_context(get_catalog().use_file(log_id))
+            dump = open_text_dump(path)
+            stack.callback(dump.close)
+            stem = secure_filename(metadata['display_name']) or f'log-{log_id}'
+            disposition = 'attachment' if request.args.get('download') == '1' else 'inline'
+            response = Response(
+                _stream_dump(dump, stack), content_type='text/plain; charset=utf-8'
+            )
+            response.headers['Content-Disposition'] = dump_options_header(
+                disposition, {'filename': stem + '.txt'}
+            )
+            response.headers['X-Content-Type-Options'] = 'nosniff'
+            response.headers['Cache-Control'] = 'no-store'
+            response.headers['X-Accel-Buffering'] = 'no'
+            response.call_on_close(stack.close)
             return response
         except BaseException:
             stack.close()
