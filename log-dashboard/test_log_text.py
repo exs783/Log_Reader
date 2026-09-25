@@ -69,6 +69,13 @@ class _StubbornProcess(_FakeProcess):
 
 
 class LogTextTests(unittest.TestCase):
+    def test_process_launch_failure_raises_adapter_error(self):
+        with patch(
+            'log_text.subprocess.Popen', side_effect=OSError('cannot start process')
+        ):
+            with self.assertRaisesRegex(TextDumpError, 'could not start'):
+                open_text_dump(Path('/tmp/source.bin'))
+
     def test_read_failure_before_output_raises_adapter_error_and_reaps_process(self):
         stream = _BrokenStream()
         process = _FakeProcess(stream, 1, running=True)

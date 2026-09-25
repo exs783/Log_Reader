@@ -215,6 +215,9 @@ class CatalogAPITests(unittest.TestCase):
             b'\n[TEXT DUMP INCOMPLETE: conversion failed]\n',
         )
         response.close()
+        download = self.client.get(f"/api/logs/{saved['id']}/download")
+        self.assertEqual(download.data, DATAFLASH_TEXT)
+        download.close()
 
     def test_log_folder_crud_and_filters(self):
         folder_response = self.client.post(

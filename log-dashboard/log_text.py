@@ -82,11 +82,14 @@ def open_text_dump(path: Path) -> TextDump:
         raise TextDumpError('Log text converter is not installed')
 
     command = [sys.executable, '-u', str(converter), str(path)]
-    process = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError as error:
+        raise TextDumpError('Log text converter could not start') from error
     if process.stdout is None:
         process.terminate()
         process.wait()
