@@ -6,11 +6,10 @@ Enhanced with MAVExplorer-like analysis capabilities & proper vibration FFT anal
 """
 
 from flask import Flask, request, jsonify, send_from_directory
-from flask_cors import CORS
+from werkzeug.exceptions import HTTPException
 import os
 from pathlib import Path
 from datetime import datetime
-from tempfile import TemporaryDirectory
 import numpy as np
 import pandas as pd
 from pymavlink import mavutil
@@ -19,8 +18,10 @@ import json
 from scipy import signal, stats
 from scipy.spatial.distance import euclidean
 
+from catalog import CatalogError
+from catalog_routes import get_catalog, init_catalog, register_catalog_routes
+
 app = Flask(__name__)
-CORS(app)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UPLOAD_FOLDER = os.path.join(BASE_DIR, 'uploads')
@@ -32,6 +33,10 @@ if not os.path.exists(UPLOAD_FOLDER):
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 app.config['MAX_CONTENT_LENGTH'] = MAX_FILE_SIZE
+app.config['CATALOG_DIR'] = os.environ.get(
+    'CATALOG_DIR', os.path.join(BASE_DIR, 'catalog-data')
+)
+app.config['PUBLIC_ORIGIN'] = os.environ.get('PUBLIC_ORIGIN')
 
 # ── ArduCopter frame type map ──────────────────────────────────────────────
 FRAME_TYPES = {
@@ -1016,25 +1021,32 @@ def upload_file():
             return jsonify({'error': 'No file selected'}), 400
         if not allowed_file(file.filename):
             return jsonify({'error': 'Invalid file type. Allowed: .bin, .log'}), 400
-        extension = file.filename.rsplit('.', 1)[1].lower()
-        with TemporaryDirectory(prefix='log-upload-') as upload_dir:
-            filepath = os.path.join(upload_dir, f'upload.{extension}')
-            file.save(filepath)
-            print(f"File uploaded: {filepath}")
-            return jsonify(run_analysis(filepath, file.filename)), 200
-    except Exception as e:
-        print(f"Upload error: {e}")
-        traceback.print_exc()
-        return jsonify({'error': str(e)}), 500
+        analysis, temporary = get_catalog().ingest(
+            file.stream, file.filename, run_analysis,
+        )
+        return jsonify({**analysis, 'log_id': temporary['id'],
+                        'expires_at': temporary['expires_at']}), 200
+    except HTTPException:
+        raise
+    except CatalogError as error:
+        return jsonify({'error': str(error)}), error.status_code
+    except Exception:
+        app.logger.exception('Upload failed')
+        return jsonify({'error': 'Upload failed'}), 500
 
 
 @app.route('/api/analyze/<filename>', methods=['GET'])
 def analyze_file(filename):
     try:
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-        if not os.path.exists(filepath):
+        upload_root = Path(app.config['UPLOAD_FOLDER']).resolve()
+        filepath = (upload_root / filename).resolve()
+        try:
+            filepath.relative_to(upload_root)
+        except ValueError:
             return jsonify({'error': 'File not found'}), 404
-        return jsonify(run_analysis(filepath, filename)), 200
+        if not filepath.is_file():
+            return jsonify({'error': 'File not found'}), 404
+        return jsonify(run_analysis(str(filepath), filename)), 200
     except Exception as e:
         print(f"Analysis error: {e}")
         traceback.print_exc()
@@ -1066,8 +1078,12 @@ def health():
 def too_large(e):
     return jsonify({'error': 'File too large. Maximum size: 500MB'}), 413
 
+
+register_catalog_routes(app, lambda path, name: run_analysis(path, name))
+
 #
 if __name__ == '__main__':
 #    print("Starting Pixhawk Log Reader Backend...")
 #    print(f"Upload folder: {os.path.abspath(app.config['UPLOAD_FOLDER'])}")
+    init_catalog(app)
     app.run()
