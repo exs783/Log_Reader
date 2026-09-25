@@ -195,3 +195,20 @@ runtime described by the development environment. Run it with:
 ```bash
 .venv/bin/python -m unittest discover -s log-dashboard -p 'test_*.py'
 ```
+
+On this Ubuntu host, use the matching Playwright Docker image to run browser
+checks without installing host browser libraries. From the repository root, with
+the existing Python 3.12 virtual environment and development dependencies:
+
+```bash
+docker run --rm --network none \
+  -e PYTHONDONTWRITEBYTECODE=1 \
+  -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
+  -v "$PWD:$PWD:ro" -w "$PWD" \
+  mcr.microsoft.com/playwright/python:v1.63.0-noble \
+  .venv/bin/python -m unittest discover -s log-dashboard -p 'test_*.py'
+```
+
+The repository is read-only in this container; tests create their own temporary
+catalogs. Match the image version to `.venv/bin/python -m playwright --version`
+when upgrading Playwright.
