@@ -153,6 +153,11 @@ class CatalogTests(unittest.TestCase):
         )
         self.store.delete_folder(folder['id'])
 
+    def test_list_logs_rejects_missing_folder(self):
+        with self.assertRaises(CatalogError) as error:
+            self.store.list_logs(folder_id=999)
+        self.assertEqual(error.exception.status_code, 404)
+
     def test_use_file_prevents_delete_until_context_closes(self):
         saved = self.store.save(self.ingest(content=b'locked')['id'], {
             'display_name': 'Locked',

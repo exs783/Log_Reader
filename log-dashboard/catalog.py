@@ -263,6 +263,13 @@ class CatalogStore:
             raise CatalogError('Invalid name filter', 400)
         if not isinstance(tag, str):
             raise CatalogError('Invalid tag filter', 400)
+        if folder_id is not None:
+            with self._connect() as connection:
+                folder = connection.execute(
+                    'SELECT id FROM folders WHERE id = ?', (folder_id,)
+                ).fetchone()
+            if folder is None:
+                raise CatalogError('Folder not found', 404)
 
         conditions = ["l.status = 'saved'"]
         parameters: list[object] = []
