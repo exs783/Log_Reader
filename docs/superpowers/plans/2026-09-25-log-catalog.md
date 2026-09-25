@@ -10,7 +10,11 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-25-log-catalog-design.md`
 
-**Status:** Awaiting written-plan review. The user selected subagent-driven execution and requested implementation, review, and commits on `feat/log-catalog`. No product implementation has started.
+**Status:** Implemented and locally verified on `feat/log-catalog`; all five task reviews passed. Live activation and physical Ctrl+F/Cmd+F acceptance remain pending. No push, merge, live container replacement, password change, nginx reload, or host cron change was performed.
+
+**Verification (2026-09-25):** 60 dashboard tests passed, including real Chromium. Focused type, JavaScript syntax, and Compose checks passed. Disposable Docker/nginx verified authentication, saved-file persistence after recreation, startup cleanup, original-byte and converter parity, and a 300,937,996-byte text stream in 82 seconds from a 56,545,280-byte log. Existing uploads and the live container were preserved.
+
+**Execution notes:** Browser checks used the version-matched Playwright Docker image because host browser libraries are absent; no system packages were installed. `.playwright-browsers/` is the ignored optional local cache. Automated plain-text navigation and `window.find()` passed; the remaining manual keyboard check is included in activation instructions.
 
 ## Global Constraints
 
@@ -92,7 +96,7 @@ Live activation is separate from code implementation. Do not reload the live pro
 
 Metadata inputs use `display_name`, `folder_id`, `tags`, and `notes`. Save defaults folder to 1 and optional tags/notes to empty values but requires a valid display name. Public log metadata keys are `id`, `status`, `original_filename`, `size_bytes`, `created_at`, `expires_at`, `saved_at`, `updated_at`, `display_name`, `folder_id`, `tags`, `notes`. Public timestamps are ISO 8601 UTC strings ending in `Z`, or null. Store UTC epoch seconds internally. Folder dictionaries use `id`, `parent_id`, `name`, `created_at`.
 
-- [ ] **Step 1: Prepare ignored storage and verification tools.** Add `log-dashboard/catalog-data/`, `.catalog-test/`, and project-local browser downloads to both ignore files before creating them. Preserve existing patterns. Install development requirements into `.venv`, not system Python.
+- [x] **Step 1: Prepare ignored storage and verification tools.** Add `log-dashboard/catalog-data/`, `.catalog-test/`, and project-local browser downloads to both ignore files before creating them. Preserve existing patterns. Install development requirements into `.venv`, not system Python.
 
 ```text
 -r requirements.txt
@@ -100,7 +104,7 @@ mypy
 playwright
 ```
 
-- [ ] **Step 2: Start the store seam with a failing save/retention test.** Use a real temporary directory and a supplied clock. The analyzer callback is this module's external input, not a patched internal method. Extend one behavior at a time after each red/green cycle.
+- [x] **Step 2: Start the store seam with a failing save/retention test.** Use a real temporary directory and a supplied clock. The analyzer callback is this module's external input, not a patched internal method. Extend one behavior at a time after each red/green cycle.
 
 ```python
 import io
@@ -151,7 +155,7 @@ class CatalogTests(unittest.TestCase):
 
 Run `.venv/bin/python -m unittest discover -s log-dashboard -p test_catalog.py`; first expect an import failure because the module does not exist. Then add only the behavior needed for each test.
 
-- [ ] **Step 3: Implement the store and schema, with focused red/green slices.** Use `sqlite3`, `PRAGMA foreign_keys = ON` per connection, a 5-second busy timeout, short `BEGIN IMMEDIATE` write transactions, and transactional schema-version migration. Future unknown schema versions fail initialization. Private directories use 0700 and data files use 0600. Never chmod or import the legacy uploads folder.
+- [x] **Step 3: Implement the store and schema, with focused red/green slices.** Use `sqlite3`, `PRAGMA foreign_keys = ON` per connection, a 5-second busy timeout, short `BEGIN IMMEDIATE` write transactions, and transactional schema-version migration. Future unknown schema versions fail initialization. Private directories use 0700 and data files use 0600. Never chmod or import the legacy uploads folder.
 
 The first migration is equivalent to this SQL, plus the required state CHECK constraints described immediately below:
 
@@ -191,14 +195,14 @@ For cleanup/delete, acquire a nonblocking exclusive lock before a short transact
 
 Validate JSON-equivalent types as well as lengths: names/tags must be strings, tags a list of strings, folder IDs real integers rather than booleans, notes a string. Trim names, reject empties, `/`, `\\`, and Unicode control characters in names/tags. Allow line breaks in notes. Missing referenced folders return 404, invalid metadata 400, locked/nonempty/root-operation conflicts 409. Keep file/header sanitization separate from display names.
 
-- [ ] **Step 4: Add the remaining behavioral slices and run the focused file/type check.** Cover idempotent Save, invalid Save preserving its original deadline, same-name uploads not overwriting, literal-name and normalized-tag filtering, folder rename/move/empty deletion, immutable root, errors during source read/analyzer, abandoned processing after a child exits, deletion retry after an injected filesystem unlink error, and independent store instances competing at the deadline. Use real locks and temporary SQLite; inject only time/filesystem failures. Verify active `use_file()` prevents deletion and that closing it permits deletion.
+- [x] **Step 4: Add the remaining behavioral slices and run the focused file/type check.** Cover idempotent Save, invalid Save preserving its original deadline, same-name uploads not overwriting, literal-name and normalized-tag filtering, folder rename/move/empty deletion, immutable root, errors during source read/analyzer, abandoned processing after a child exits, deletion retry after an injected filesystem unlink error, and independent store instances competing at the deadline. Use real locks and temporary SQLite; inject only time/filesystem failures. Verify active `use_file()` prevents deletion and that closing it permits deletion.
 
 ```bash
 .venv/bin/python -m unittest discover -s log-dashboard -p test_catalog.py
 .venv/bin/python -m mypy --follow-imports=silent --ignore-missing-imports --check-untyped-defs log-dashboard/catalog.py
 ```
 
-- [ ] **Step 5: Commit only the Task 1 files**, using `feat: add private catalog storage and cleanup`. Report tests with commands/results and the public method contract to the controller. Do not dispatch a reviewer yourself.
+- [x] **Step 5: Commit only the Task 1 files**, using `feat: add private catalog storage and cleanup`. Report tests with commands/results and the public method contract to the controller. Do not dispatch a reviewer yourself.
 
 ### Task 2: Upload lifecycle and catalog HTTP routes
 
@@ -212,7 +216,7 @@ Validate JSON-equivalent types as well as lengths: names/tags must be strings, t
 
 Register catalog routes with an analyzer callback that resolves the backend function at call time: `register_catalog_routes(app, lambda path, name: run_analysis(path, name))`. This keeps both upload and saved-log reanalysis on the same existing analyzer seam.
 
-- [ ] **Step 1: Write the first HTTP lifecycle test and observe red.** Configure a temporary store and an explicit test origin. Keep the existing upload test's analysis fake at the analyzer seam; use the real store and HTTP handlers.
+- [x] **Step 1: Write the first HTTP lifecycle test and observe red.** Configure a temporary store and an explicit test origin. Keep the existing upload test's analysis fake at the analyzer seam; use the real store and HTTP handlers.
 
 ```python
 import io
@@ -244,7 +248,7 @@ def test_upload_save_and_original_download(self):
 
 Put this method in `CatalogAPITests(unittest.TestCase)`. In `setUp`, use `TemporaryDirectory`, `CatalogStore`, and `init_catalog(backend.app, store=store)`; preserve/restore modified config/extensions in cleanup. Set `self.backend`, `self.client`, and `self.store`. Do not write catalog fixtures to the legacy uploads directory.
 
-- [ ] **Step 2: Implement the upload replacement and JSON routes.** Keep the existing upload route in `python_backend.py` so current mocks/hooks remain valid. Replace the TemporaryDirectory block with:
+- [x] **Step 2: Implement the upload replacement and JSON routes.** Keep the existing upload route in `python_backend.py` so current mocks/hooks remain valid. Replace the TemporaryDirectory block with:
 
 ```python
 analysis, temporary = get_catalog().ingest(
@@ -273,7 +277,7 @@ Preserve no-file/type checks, the 500 * 1024 * 1024 request limit, and analysis 
 
 Empty or non-object JSON, unknown metadata keys, malformed filters, and wrong types return 400 without partial mutations. The root folder is ID 1. Missing records return 404; identifiable expired Save returns 410. Both 404 and 410 will mean re-upload in the Save UI.
 
-- [ ] **Step 3: Add same-origin protection and lifetime-safe original downloads.** Remove unrestricted `CORS(app)` and its unused backend import. For POST/PATCH/DELETE/PUT API requests, compare a present Origin exactly with `PUBLIC_ORIGIN` or `request.host_url.rstrip('/')`. Reject null/foreign origins. If Origin is absent, require `Sec-Fetch-Site: same-origin`; absent or cross-site metadata is rejected. CLI examples must send the configured Origin. No new application login/session system: nginx supplies the shared password gate in Task 5.
+- [x] **Step 3: Add same-origin protection and lifetime-safe original downloads.** Remove unrestricted `CORS(app)` and its unused backend import. For POST/PATCH/DELETE/PUT API requests, compare a present Origin exactly with `PUBLIC_ORIGIN` or `request.host_url.rstrip('/')`. Reject null/foreign origins. If Origin is absent, require `Sec-Fetch-Site: same-origin`; absent or cross-site metadata is rejected. CLI examples must send the configured Origin. No new application login/session system: nginx supplies the shared password gate in Task 5.
 
 Hold `use_file()` through the complete original response, including client cancellation. Safe response ownership follows this pattern:
 
@@ -301,7 +305,7 @@ except BaseException:
 
 New routes expose no storage filenames/paths. Keep `/api/files` and `/api/analyze/<filename>` behavior for legacy files; do not add an uploads/static directory route. Verify the legacy filename lookup remains constrained to `UPLOAD_FOLDER`.
 
-- [ ] **Step 4: Adapt regressions and verify focused files/typechecking.** Successful-upload tests now expect UUID files retained for one hour; remove only the old immediate-success deletion assertions and TemporaryDirectory monkeypatch. Retain original-name display, traversal/sentinel, duplicate filename, failure cleanup, allowlist, and parser-close tests. Adapt partial-write injection to the stream/filesystem seam because ingest no longer calls `FileStorage.save`. Test actual 413 behavior with a temporarily reduced test limit, not a 500 MB fixture. Add CRUD/error/filter tests, rejected foreign/null/missing Origin, permitted same-origin requests, reanalysis failure preserving saved bytes, and unbuffered download close permitting deletion.
+- [x] **Step 4: Adapt regressions and verify focused files/typechecking.** Successful-upload tests now expect UUID files retained for one hour; remove only the old immediate-success deletion assertions and TemporaryDirectory monkeypatch. Retain original-name display, traversal/sentinel, duplicate filename, failure cleanup, allowlist, and parser-close tests. Adapt partial-write injection to the stream/filesystem seam because ingest no longer calls `FileStorage.save`. Test actual 413 behavior with a temporarily reduced test limit, not a 500 MB fixture. Add CRUD/error/filter tests, rejected foreign/null/missing Origin, permitted same-origin requests, reanalysis failure preserving saved bytes, and unbuffered download close permitting deletion.
 
 ```bash
 .venv/bin/python -m unittest discover -s log-dashboard -p test_uploads.py
@@ -309,7 +313,7 @@ New routes expose no storage filenames/paths. Keep `/api/files` and `/api/analyz
 .venv/bin/python -m mypy --follow-imports=silent --ignore-missing-imports --check-untyped-defs log-dashboard/catalog.py log-dashboard/catalog_routes.py
 ```
 
-- [ ] **Step 5: Commit only Task 2 files**, using `feat: expose saved-log catalog and upload lifecycle`. Report schema/response deviations before returning DONE; do not silently change Task 1's interface.
+- [x] **Step 5: Commit only Task 2 files**, using `feat: expose saved-log catalog and upload lifecycle`. Report schema/response deviations before returning DONE; do not silently change Task 1's interface.
 
 ### Task 3: On-demand text download and browser response
 
@@ -319,7 +323,7 @@ New routes expose no storage filenames/paths. Keep `/api/files` and `/api/analyz
 
 **Produces:** `open_text_dump(path: Path) -> TextDump`, a closeable byte iterator. It starts and primes conversion before returning, raises `TextDumpError` if conversion fails before output, yields a clear error marker if failure follows output, and terminates/reaps its child on `close()`. `TextDump` exposes iteration and `close()`, not process details. `GET /api/logs/<id>/text` returns inline text; `?download=1` changes disposition only. Both require an existing saved log.
 
-- [ ] **Step 1: Write and fail a route/format test using a real converter input.** Use a tiny DataFlash text fixture whose custom `TEST` message is not in the analyzer's target list:
+- [x] **Step 1: Write and fail a route/format test using a real converter input.** Use a tiny DataFlash text fixture whose custom `TEST` message is not in the analyzer's target list:
 
 ```python
 DATAFLASH_TEXT = (
@@ -350,7 +354,7 @@ def test_view_is_plain_text_and_download_has_same_contents(self):
 
 Use the Task 2 HTTP fixture, with a temporary real store. Compare this small output with invoking the installed converter directly on the same stored original under the same timezone, using `use_file()` to obtain its path; do not derive expected dump text from the new adapter itself.
 
-- [ ] **Step 2: Implement the external-process adapter.** Locate the script in `sysconfig.get_path('scripts')`, with an explicit missing-converter error. Start Python unbuffered with fixed arguments, stdout piped, and no shell:
+- [x] **Step 2: Implement the external-process adapter.** Locate the script in `sysconfig.get_path('scripts')`, with an explicit missing-converter error. Start Python unbuffered with fixed arguments, stdout piped, and no shell:
 
 ```python
 command = [sys.executable, '-u', str(converter_path), str(path)]
@@ -360,7 +364,7 @@ process = subprocess.Popen(command, stdout=subprocess.PIPE,
 
 Read bounded 64 KiB byte chunks. Prime the first read before returning a success response. If no bytes and the child exits nonzero, raise an error mapped to 500. If any bytes were emitted and the exit code is nonzero, append `\n[TEXT DUMP INCOMPLETE: conversion failed]\n`, log the failure, and close. Never collect a whole dump or write a permanent text file. In `close()`, close stdout, terminate a still-running child, wait up to 2 seconds, then kill/reap only that child if needed. Cleanup also runs on exceptions and response cancellation.
 
-- [ ] **Step 3: Bind response ownership and headers.** Acquire `use_file()` and open the converter in an `ExitStack` before returning the response; register stack closure for normal end and early disconnect, including closing a response before consuming it. Attach `text/plain; charset=utf-8`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, and `X-Accel-Buffering: no`. Use Werkzeug's header helpers for inline/attachment dispositions and the same sanitized-name policy as original downloads, with `.txt` extension. Never interpolate dump bytes into HTML.
+- [x] **Step 3: Bind response ownership and headers.** Acquire `use_file()` and open the converter in an `ExitStack` before returning the response; register stack closure for normal end and early disconnect, including closing a response before consuming it. Attach `text/plain; charset=utf-8`, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, and `X-Accel-Buffering: no`. Use Werkzeug's header helpers for inline/attachment dispositions and the same sanitized-name policy as original downloads, with `.txt` extension. Never interpolate dump bytes into HTML.
 
 ```python
 response = Response(dump, content_type='text/plain; charset=utf-8')
@@ -373,7 +377,7 @@ response.call_on_close(stack.close)
 
 `dump` is the `TextDump` iterator registered with `stack.callback(dump.close)`; `disposition_header` is created using Werkzeug header serialization, not string concatenation of raw display names. Arrange cleanup so natural iterator exhaustion also closes the lock, not only an explicitly closed test response.
 
-- [ ] **Step 4: Test cancellation, failure, and hostile text at the process/HTTP seams.** Inject fake process behavior only at the subprocess boundary to exercise failure before first output, failure after a chunk, and termination escalation. Add an actual small-process cancellation check to ensure the child exits; assert through completion, not private adapter fields. Confirm a saved source remains readable after all failures, early response closure allows deletion, and HTML-looking log strings remain literal response bytes with plain-text headers. Reading the first chunk must not consume or assemble the entire remaining iterator.
+- [x] **Step 4: Test cancellation, failure, and hostile text at the process/HTTP seams.** Inject fake process behavior only at the subprocess boundary to exercise failure before first output, failure after a chunk, and termination escalation. Add an actual small-process cancellation check to ensure the child exits; assert through completion, not private adapter fields. Confirm a saved source remains readable after all failures, early response closure allows deletion, and HTML-looking log strings remain literal response bytes with plain-text headers. Reading the first chunk must not consume or assemble the entire remaining iterator.
 
 ```bash
 .venv/bin/python -m unittest discover -s log-dashboard -p test_log_text.py
@@ -381,7 +385,7 @@ response.call_on_close(stack.close)
 .venv/bin/python -m mypy --follow-imports=silent --ignore-missing-imports --check-untyped-defs log-dashboard/log_text.py log-dashboard/catalog_routes.py
 ```
 
-- [ ] **Step 5: Commit the Task 3 files**, using `feat: stream log text downloads and browser views`. Record any converter fixture format corrections with the observed CLI output; do not replace the converter with a filtered approximation.
+- [x] **Step 5: Commit the Task 3 files**, using `feat: stream log text downloads and browser views`. Record any converter fixture format corrections with the observed CLI output; do not replace the converter with a filtered approximation.
 
 ### Task 4: Catalog UI and native browser workflow
 
@@ -391,7 +395,7 @@ response.call_on_close(stack.close)
 
 **Produces:** A top-level Analyzer/Catalog selector, explicit Save dialog, catalog listing/editor/folder controls, and the three per-log file actions. `window.logCatalog` exposes `uploaded(result)`, `cleared()`, and `opened(metadata)` for the existing analyzer code. A small `displayAnalysis(result)` function in the HTML owns the existing successful-analysis render sequence, shared by upload and catalog reanalysis. Do not rewrite plot functions or the Events renderer.
 
-- [ ] **Step 1: Add one failing browser Save test.** Install Chromium into a project-ignored browser-cache directory using Playwright, not system packages. The Python unittest starts the Flask application on an ephemeral loopback port using a temporary real catalog and stops it during cleanup. Inject a fixed result at the existing analyzer seam for upload/reanalysis; keep browser requests, the upload stream, catalog HTTP, and SQLite real.
+- [x] **Step 1: Add one failing browser Save test.** Install Chromium into a project-ignored browser-cache directory using Playwright, not system packages. The Python unittest starts the Flask application on an ephemeral loopback port using a temporary real catalog and stops it during cleanup. Inject a fixed result at the existing analyzer seam for upload/reanalysis; keep browser requests, the upload stream, catalog HTTP, and SQLite real.
 
 ```python
 def test_save_prompts_then_catalog_displays_inert_metadata(self):
@@ -416,7 +420,7 @@ def test_save_prompts_then_catalog_displays_inert_metadata(self):
 
 Configure the upload fixture through the existing analyzer seam so the upload really creates a temporary record. Block external Plotly loading or replace its browser global with a minimal test adapter so the smoke test does not depend on a CDN. Keep a fixture with the summary/analysis fields the unchanged overview renderer needs.
 
-- [ ] **Step 2: Implement the UI and its analysis-selection hooks.** Change the existing API constant to `'/api'`. Add selector buttons outside `.nav-btn` so analysis gating does not disable the catalog. Use native `<dialog>` elements and ordinary form controls. Add Save/expiry controls inside the upload area and a catalog panel independent of the analysis `.page` list.
+- [x] **Step 2: Implement the UI and its analysis-selection hooks.** Change the existing API constant to `'/api'`. Add selector buttons outside `.nav-btn` so analysis gating does not disable the catalog. Use native `<dialog>` elements and ordinary form controls. Add Save/expiry controls inside the upload area and a catalog panel independent of the analysis `.page` list.
 
 ```javascript
 function displayAnalysis(result) {
@@ -443,7 +447,7 @@ Default names use current UTC date/time plus the first 8 hex characters of the U
 
 Render a simple list with name search, one tag filter, current-folder filter and an All folders option. Offer create/rename/delete-empty folder, rename/edit/move log, analyze, and confirmed log deletion. Root rename/delete controls are unavailable. Reanalysis switches to Analyzer and calls `displayAnalysis(result)`; a failure leaves the catalog original untouched and reports an error.
 
-- [ ] **Step 3: Add direct file links and safe rendering.** Use `createElement`, `textContent`, and properties for all returned strings. Do not build catalog HTML with interpolated innerHTML. File URLs contain only encoded server log IDs; new tabs use `rel="noopener"`.
+- [x] **Step 3: Add direct file links and safe rendering.** Use `createElement`, `textContent`, and properties for all returned strings. Do not build catalog HTML with interpolated innerHTML. File URLs contain only encoded server log IDs; new tabs use `rel="noopener"`.
 
 ```javascript
 const textLink = document.createElement('a');
@@ -471,7 +475,7 @@ node --check log-dashboard/catalog.js
 
 Also syntax-check the HTML's inline script with Node by extracting it in a temporary test process; do not add a bundler or frontend framework. If Chromium cannot start without system installation, report that exact limitation; do not claim browser verification from a string-only DOM mock.
 
-- [ ] **Step 5: Commit only Task 4 files**, using `feat: add catalog save and browser log workflow`. Report actual browser checks separately from any still-manual native Ctrl+F check.
+- [x] **Step 5: Commit only Task 4 files**, using `feat: add catalog save and browser log workflow`. Report actual browser checks separately from any still-manual native Ctrl+F check.
 
 ### Task 5: Docker startup, private deployment support, and end-to-end verification
 
@@ -481,7 +485,7 @@ Also syntax-check the HTML's inline script with Node by extracting it in a tempo
 
 **Produces:** Persistent private mount, startup migrations/sweep, `python catalog.py cleanup --data-dir PATH` operator command, and reviewed manual auth/cron/backup instructions. CLI exits 0 after a healthy sweep and nonzero for cleanup failures, prints only removed/skipped/failed counts, and shares the same store implementation rather than SQL duplication.
 
-- [ ] **Step 1: Add failing CLI/startup tests.** In a temporary store create an expired temporary upload and a saved original. Run the CLI in a subprocess and reopen the store to verify only saved data remains. Add a test that startup initialization invokes a sweep before a request and that a failed/incompatible migration prevents startup. Observe red before adding the entrypoint.
+- [x] **Step 1: Add failing CLI/startup tests.** In a temporary store create an expired temporary upload and a saved original. Run the CLI in a subprocess and reopen the store to verify only saved data remains. Add a test that startup initialization invokes a sweep before a request and that a failed/incompatible migration prevents startup. Observe red before adding the entrypoint.
 
 ```python
 completed = subprocess.run([
@@ -494,7 +498,7 @@ self.assertEqual(self.store.get(self.saved_id)['display_name'], 'Keep')
 
 Construct expired data using a store clock more than 3600 seconds before real time, not SQL mutation. Saved data is created through ingest/save. Tests use process-local arguments/environment, not live host cron.
 
-- [ ] **Step 2: Add startup and Compose configuration.** Initialize before Gunicorn accepts requests:
+- [x] **Step 2: Add startup and Compose configuration.** Initialize before Gunicorn accepts requests:
 
 ```python
 # log-dashboard/wsgi.py
@@ -526,7 +530,7 @@ Use a single Gunicorn worker with a finite 600-second request timeout, matching 
 CMD ["gunicorn", "--bind", "0.0.0.0:8000", "--workers", "1", "--timeout", "600", "wsgi:app"]
 ```
 
-- [ ] **Step 3: Write deployable proxy/cron inputs and exact operator steps.** The nginx file is an include snippet for the existing HTTPS server, not a replacement for certificate configuration:
+- [x] **Step 3: Write deployable proxy/cron inputs and exact operator steps.** The nginx file is an include snippet for the existing HTTPS server, not a replacement for certificate configuration:
 
 ```nginx
 auth_basic "Team log catalog";
@@ -547,7 +551,7 @@ Activation order is explicit: obtain authorization and a team password; install 
 
 README replaces the immediate-success-deletion description with the one-hour temporary lifecycle and indefinite saved retention. Explain the three file actions, browser-memory warning, manual deployment, no CD, expected 404/410 Save expiry, and how to run focused tests/typechecking. Describe a consistent manual backup: disable the named cleanup job, stop this application, archive the entire catalog-data directory with permissions, restart the application, restore the named cleanup job, and verify. Restore the database and files together while stopped; never overwrite live catalog data without separate confirmation. Persistence is not backup.
 
-- [ ] **Step 4: Verify the complete local feature, then run the full dashboard suite once.** Use a disposable Docker project or `docker run` with a temporary data volume and an ephemeral loopback port; never use `docker compose up` against the live project during implementation. Set `PUBLIC_ORIGIN` to the disposable browser/proxy origin, including its assigned port. Use a temporary nginx instance with a generated test-only credential outside Git to verify 401 before login and success after login, the catch-all auth coverage, and text response headers. Do not print the credential. Recreate the disposable application container with the same private volume and verify saved records/bytes survive and startup removes expired uploads. Execute cleanup with no browser traffic.
+- [x] **Step 4: Verify the complete local feature, then run the full dashboard suite once.** Use a disposable Docker project or `docker run` with a temporary data volume and an ephemeral loopback port; never use `docker compose up` against the live project during implementation. Set `PUBLIC_ORIGIN` to the disposable browser/proxy origin, including its assigned port. Use a temporary nginx instance with a generated test-only credential outside Git to verify 401 before login and success after login, the catch-all auth coverage, and text response headers. Do not print the credential. Recreate the disposable application container with the same private volume and verify saved records/bytes survive and startup removes expired uploads. Execute cleanup with no browser traffic.
 
 Upload the tracked `log-dashboard/uploads/00000005.BIN` through this disposable app, Save with edited metadata, reanalyze, compare original-download bytes, and compare the streamed dump against CLI output. The existing larger untracked sample may be read for a representative streaming test but must not be modified or committed. Verify the proxy completes the conversion within the configured limit and does not report a truncated output as complete. Stop/remove only test-owned containers and recoverable temporary artifacts.
 
@@ -562,7 +566,7 @@ git diff --check
 
 The full dashboard suite includes the browser file and requires its local browser/runtime setup. Keep that test visible if unavailable; do not silently skip it and report full verification. Do not rerun the entire suite during each review cycle; run files covering changed code.
 
-- [ ] **Step 5: Commit the Task 5 files**, using `feat: prepare persistent private catalog deployment`. Report local evidence and explicitly pending live activation checks. Do not claim nginx, cron, or the live website changed.
+- [x] **Step 5: Commit the Task 5 files**, using `feat: prepare persistent private catalog deployment`. Report local evidence and explicitly pending live activation checks. Do not claim nginx, cron, or the live website changed.
 
 ## Review and finish
 

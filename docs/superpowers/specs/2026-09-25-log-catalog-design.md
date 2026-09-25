@@ -1,7 +1,8 @@
 # Private team log catalog
 
-Status: catalog and text-dump design approved through the request to implement
-using subagent-driven development. The implementation plan awaits review.
+Status: catalog and text-dump design approved and implemented on `feat/log-catalog`
+using subagent-driven development. Local verification passed; live activation and
+physical Ctrl+F/Cmd+F acceptance remain pending.
 
 ## Purpose and agreed scope
 
