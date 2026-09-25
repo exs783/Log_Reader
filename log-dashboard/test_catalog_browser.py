@@ -31,6 +31,43 @@ ANALYSIS = {
         },
     },
     'analyses': {
+        'imu': {
+            'timestamps': [0, 1_000_000],
+            'accX': [0.1, 0.2], 'accY': [0.2, 0.3], 'accZ': [9.7, 9.8],
+            'gyrX': [0.01, 0.02], 'gyrY': [0.02, 0.03], 'gyrZ': [0.03, 0.04],
+        },
+        'vibration': {
+            'timestamps': [0, 1_000_000],
+            'vibration_magnitude': [9.7, 9.8],
+        },
+        'attitude': {
+            'timestamps': [0, 1_000_000],
+            'desRoll': [1.0, 2.0], 'roll': [0.9, 1.9],
+            'desPitch': [2.0, 3.0], 'pitch': [1.9, 2.9],
+        },
+        'pid': {
+            'timestamps': [0, 1_000_000],
+            'desRoll': [1.0, 2.0], 'roll': [0.9, 1.9],
+            'desPitch': [2.0, 3.0], 'pitch': [1.9, 2.9],
+        },
+        'battery': {
+            'timestamps': [0, 1_000_000],
+            'voltage': [24.0, 23.8], 'current': [4.0, 5.0],
+        },
+        'motors': {
+            'timestamps': [0, 1_000_000], 'motor_count': 2,
+            'motor1': [1200, 1300], 'motor2': [1210, 1310],
+        },
+        'magnetometer': {
+            'timestamps': [0, 1_000_000], 'magnitude': [410.0, 412.0],
+        },
+        'barometer': {
+            'timestamps': [0, 1_000_000], 'altitude': [10.0, 11.0],
+        },
+        'gps': {
+            'timestamps': [0, 1_000_000],
+            'altitude': [100.0, 101.0], 'num_satellites': [12, 13],
+        },
         'events': {
             'events': [
                 {'type': 'MODE_CHANGE', 'value': '<img src=x onerror=alert(1)>',
@@ -105,7 +142,9 @@ class CatalogBrowserTests(unittest.TestCase):
         self.context = self.browser.new_context()
         self.addCleanup(self.context.close)
         self.context.add_init_script(
-            "window.Plotly = {newPlot: () => Promise.resolve()};"
+            "window.__plotCalls = [];"
+            "window.Plotly = {newPlot: (id) => {"
+            "window.__plotCalls.push(id); return Promise.resolve();}};"
         )
         self.page = self.context.new_page()
         self.page.route(
@@ -227,6 +266,8 @@ class CatalogBrowserTests(unittest.TestCase):
 
     def test_saved_log_reanalysis_renders_tabs_and_failure_preserves_catalog_log(self):
         page = self.page
+        page_errors = []
+        page.on('pageerror', lambda error: page_errors.append(str(error)))
         page.goto(self.base_url)
         self.upload()
         page.locator('#save-to-catalog').click()
@@ -242,9 +283,30 @@ class CatalogBrowserTests(unittest.TestCase):
         card.get_by_role('button', name='Analyze', exact=True).click()
         expect(page.get_by_role('button', name='Analyzer', exact=True)).to_have_class('mode-btn active')
         expect(page.locator('#overview')).to_contain_text('Flight Quality Score')
+
+        plot_tabs = (
+            ('IMU Analysis', 'imu', 'imu-plot'),
+            ('Vibration', 'vibration', 'vibration-plot'),
+            ('Attitude Control', 'attitude', 'attitude-plot'),
+            ('PID Tuning', 'pid', 'pid-plot'),
+            ('Battery Health', 'battery', 'battery-plot'),
+            ('Motor Performance', 'motors', 'motors-plot'),
+            ('Magnetometer', 'magnetometer', 'magnetometer-plot'),
+            ('Barometer', 'barometer', 'barometer-plot'),
+            ('GPS & Navigation', 'gps', 'gps-plot'),
+        )
+        for tab_name, page_id, plot_id in plot_tabs:
+            page.get_by_role('tab', name=tab_name, exact=True).click()
+            expect(page.locator(f'#{page_id}')).to_be_visible()
+            self.assertIn(plot_id, page.evaluate('window.__plotCalls'))
+
         page.get_by_role('tab', name='Events', exact=True).click()
         expect(page.locator('#events-list')).to_contain_text('<img src=x onerror=alert(1)>')
         self.assertEqual(page.locator('#events-list img').count(), 0)
+        page.get_by_role('tab', name='Custom Plot', exact=True).click()
+        expect(page.locator('#customplot-plot')).to_contain_text('Select variables')
+        self.assertGreater(page.locator('.customplot-checkbox').count(), 0)
+        self.assertEqual(page_errors, [])
 
         self.analysis_mock.side_effect = RuntimeError('fixture failure')
         page.get_by_role('button', name='Catalog', exact=True).click()
