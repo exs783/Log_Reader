@@ -74,8 +74,8 @@ class CatalogTests(unittest.TestCase):
         })
 
         repeated = self.store.save(temporary['id'], {
-            'display_name': '', 'folder_id': False, 'tags': 'invalid',
-            'notes': 42,
+            'display_name': 'Replacement', 'folder_id': 1,
+            'tags': ['two'], 'notes': 'replacement',
         })
 
         self.assertEqual(repeated, saved)

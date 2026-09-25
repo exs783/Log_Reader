@@ -186,8 +186,6 @@ class CatalogStore:
             ).fetchone()
         if current is None:
             raise CatalogError('Log not found', 404)
-        if current['status'] == 'saved':
-            return self._metadata_for_id(log_id)
         if not isinstance(metadata, dict):
             raise CatalogError('Invalid metadata', 400)
         allowed = {'display_name', 'folder_id', 'tags', 'notes'}
@@ -201,6 +199,8 @@ class CatalogStore:
         notes = metadata.get('notes', '')
         if not isinstance(notes, str) or len(notes) > 10_000:
             raise CatalogError('Invalid notes', 400)
+        if current['status'] == 'saved':
+            return self._metadata_for_id(log_id)
 
         now = self.clock()
         with self._connect() as connection:

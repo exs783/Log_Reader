@@ -215,6 +215,35 @@ class CatalogAPITests(unittest.TestCase):
         )
         self.assertEqual(expired.status_code, 410)
 
+    def test_duplicate_save_validates_metadata_then_remains_idempotent(self):
+        saved = self._save()
+        files_before = sorted(self.store.files.iterdir())
+
+        for invalid in (
+            {'display_name': 'First hover', 'unknown': True},
+            {'display_name': 'First hover', 'folder_id': '1'},
+        ):
+            response = self.client.post(
+                f"/api/logs/{saved['id']}/save",
+                headers={'Origin': 'http://localhost'},
+                json=invalid,
+            )
+            self.assertEqual(response.status_code, 400)
+
+        duplicate = self.client.post(
+            f"/api/logs/{saved['id']}/save",
+            headers={'Origin': 'http://localhost'},
+            json={
+                'display_name': 'First hover',
+                'folder_id': 1,
+                'tags': ['hover'],
+                'notes': 'Watch yaw',
+            },
+        )
+        self.assertEqual(duplicate.status_code, 200)
+        self.assertEqual(duplicate.get_json()['log'], saved)
+        self.assertEqual(sorted(self.store.files.iterdir()), files_before)
+
     def test_write_requests_require_same_origin(self):
         for headers in (
             {'Origin': 'https://foreign.example'},
