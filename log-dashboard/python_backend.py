@@ -1011,6 +1011,11 @@ def index():
     return send_from_directory(BASE_DIR, 'log_dashboard.html')
 
 
+@app.route('/catalog.js')
+def catalog_script():
+    return send_from_directory(BASE_DIR, 'catalog.js')
+
+
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
     try:
