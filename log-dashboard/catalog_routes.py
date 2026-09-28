@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import secrets
 from contextlib import ExitStack
 from functools import wraps
 from pathlib import Path
@@ -8,6 +10,7 @@ from typing import Callable, Iterator, ParamSpec, cast
 
 from flask import Flask, Response, current_app, jsonify, request, send_file
 from flask.typing import ResponseReturnValue
+from werkzeug.exceptions import HTTPException
 from werkzeug.http import dump_options_header
 from werkzeug.utils import secure_filename
 
@@ -45,11 +48,24 @@ def _catalog_errors(
             return handler(*args, **kwargs)
         except CatalogError as error:
             return jsonify({'error': str(error)}), error.status_code
+        except HTTPException as error:
+            return jsonify({'error': error.description}), error.code or 500
         except Exception:
             current_app.logger.exception('Catalog request failed')
             return jsonify({'error': 'Catalog request failed'}), 500
 
     return wrapped
+
+
+def _require_ingest_key() -> None:
+    configured = current_app.config.get('INGEST_API_KEY')
+    if not configured:
+        raise CatalogError('Device ingestion is not configured', 503)
+    scheme, _, token = request.headers.get('Authorization', '').partition(' ')
+    if scheme.lower() != 'bearer' or not secrets.compare_digest(
+        token.encode('utf-8'), configured.encode('utf-8')
+    ):
+        raise CatalogError('Invalid ingestion key', 401)
 
 
 def _json_object() -> dict:
@@ -78,6 +94,8 @@ def register_catalog_routes(
 ) -> None:
     @app.before_request
     def require_same_origin() -> ResponseReturnValue | None:
+        if request.method == 'POST' and request.path == '/api/ingest':
+            return None
         if not request.path.startswith('/api/') or request.method not in {
             'POST', 'PATCH', 'DELETE', 'PUT'
         }:
@@ -94,6 +112,32 @@ def register_catalog_routes(
         elif request.headers.get('Sec-Fetch-Site') == 'same-origin':
             return None
         return jsonify({'error': 'Forbidden origin'}), 403
+
+    @app.post('/api/ingest')
+    @_catalog_errors
+    def ingest_log() -> ResponseReturnValue:
+        _require_ingest_key()
+        if request.mimetype != 'multipart/form-data':
+            raise CatalogError('Expected multipart form data', 400)
+        if set(request.files) != {'file'} or len(request.files.getlist('file')) != 1:
+            raise CatalogError('Expected one log file', 400)
+        if not set(request.form).issubset({'display_name', 'tags', 'notes'}) or any(
+            len(request.form.getlist(key)) != 1 for key in request.form
+        ):
+            raise CatalogError('Invalid request field', 400)
+        file = request.files['file']
+        if not file.filename or Path(file.filename).suffix.lower() not in {'.bin', '.log'}:
+            raise CatalogError('Invalid file type. Allowed: .bin, .log', 400)
+        metadata: dict = dict(request.form)
+        if 'tags' in metadata:
+            try:
+                metadata['tags'] = json.loads(metadata['tags'])
+            except ValueError as error:
+                raise CatalogError('Invalid tags', 400) from error
+        log_id, duplicate = get_catalog().ingest_saved(file.stream, file.filename, metadata)
+        return jsonify({'success': True, 'log_id': log_id, 'duplicate': duplicate}), (
+            200 if duplicate else 201
+        )
 
     @app.post('/api/logs/<log_id>/save')
     @_catalog_errors

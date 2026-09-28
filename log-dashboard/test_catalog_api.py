@@ -1,4 +1,5 @@
 import io
+import json
 import subprocess
 import sys
 import sysconfig
@@ -6,6 +7,9 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
+
+from werkzeug.datastructures import MultiDict
+from werkzeug.test import TestResponse
 
 from catalog import CatalogStore
 from catalog_routes import init_catalog
@@ -31,6 +35,8 @@ class CatalogAPITests(unittest.TestCase):
             'CATALOG_DIR': app.config.get('CATALOG_DIR'),
             'PUBLIC_ORIGIN': app.config.get('PUBLIC_ORIGIN'),
             'TESTING': app.config.get('TESTING'),
+            'INGEST_API_KEY': app.config.get('INGEST_API_KEY'),
+            'MAX_CONTENT_LENGTH': app.config.get('MAX_CONTENT_LENGTH'),
         }
         old_catalog = app.extensions.get('catalog')
 
@@ -42,12 +48,141 @@ class CatalogAPITests(unittest.TestCase):
                 app.extensions['catalog'] = old_catalog
 
         self.addCleanup(restore_app)
-        app.config.update(TESTING=True, PUBLIC_ORIGIN='http://localhost')
+        app.config.update(TESTING=True, PUBLIC_ORIGIN='http://localhost',
+                          INGEST_API_KEY='test-ingest-key')
         self.store = CatalogStore(
             Path(self.sandbox.name) / 'catalog', clock=lambda: self.now[0]
         )
         init_catalog(app, store=self.store)
         self.client = app.test_client()
+
+    def _device_upload(
+        self, content: bytes = b'device bytes', filename: str = 'device.BIN', **fields: str,
+    ) -> TestResponse:
+        return self.client.post(
+            '/api/ingest', headers={'Authorization': 'Bearer test-ingest-key'},
+            data={'file': (io.BytesIO(content), filename), **fields},
+        )
+
+    def test_device_upload_receipt_and_existing_actions(self):
+        with patch.object(self.backend, 'run_analysis', side_effect=AssertionError('No analysis')):
+            with patch('catalog_routes.open_text_dump', side_effect=AssertionError('No dump')):
+                first = self._device_upload(
+                    DATAFLASH_TEXT, 'device.log', display_name='Field test',
+                    tags='["Hover", "hover"]', notes='Watch yaw',
+                )
+        self.assertEqual(first.status_code, 201)
+        receipt = first.get_json()
+        self.assertEqual(set(receipt), {'success', 'log_id', 'duplicate'})
+        self.assertTrue(receipt['success'])
+        self.assertFalse(receipt['duplicate'])
+        log_id = receipt['log_id']
+        log = self.store.get(log_id)
+        self.assertEqual((log['display_name'], log['tags'], log['notes']),
+                         ('Field test', ['hover'], 'Watch yaw'))
+        retry = self._device_upload(DATAFLASH_TEXT, 'renamed.BIN', notes='Replace')
+        self.assertEqual(retry.status_code, 200)
+        self.assertEqual(retry.get_json(), {**receipt, 'duplicate': True})
+        self.assertEqual(self.store.get(log_id), log)
+        self.assertEqual(self.client.get('/api/logs').get_json()['logs'], [log])
+        download = self.client.get(f'/api/logs/{log_id}/download')
+        self.assertEqual(download.status_code, 200)
+        self.assertEqual(download.data, DATAFLASH_TEXT)
+        download.close()
+        with patch.object(self.backend, 'run_analysis', return_value=self._analysis('device.log')):
+            analyzed = self.client.post(f'/api/logs/{log_id}/analyze',
+                                       headers={'Origin': 'http://localhost'})
+        self.assertEqual(analyzed.status_code, 200)
+        self.assertEqual(analyzed.get_json()['log_id'], log_id)
+        text = self.client.get(f'/api/logs/{log_id}/text?download=1')
+        self.assertEqual(text.status_code, 200)
+        self.assertIn(b'TEST', text.data)
+        self.assertEqual(text.mimetype, 'text/plain')
+        text.close()
+
+    def test_device_upload_key_required_before_body(self):
+        self.backend.app.config['MAX_CONTENT_LENGTH'] = 256
+        with patch('flask.wrappers.Request._load_form_data',
+                   side_effect=AssertionError('Unauthorized body was parsed')):
+            for authorization in ('', 'Bearer wrong', 'Basic test-ingest-key',
+                                  'Bearer ', 'test-ingest-key', 'Bearer t\u00e9st'):
+                with self.subTest(authorization=authorization):
+                    response = self.client.post(
+                        '/api/ingest',
+                        headers={'Origin': 'http://localhost', 'Authorization': authorization},
+                        data={'file': (io.BytesIO(b'x' * 1024), 'flight.bin')},
+                    )
+                    self.assertEqual(response.status_code, 401)
+            for key in ('', None):
+                self.backend.app.config['INGEST_API_KEY'] = key
+                self.assertEqual(self._device_upload().status_code, 503)
+            self.backend.app.config.pop('INGEST_API_KEY')
+            self.assertEqual(self._device_upload().status_code, 503)
+        self.assertEqual(self.store.list_logs(), [])
+        self.assertEqual(list(self.store.files.iterdir()), [])
+
+    def test_device_key_does_not_bypass_browser_origin(self):
+        receipt = self._device_upload().get_json()
+        self.assertIn('log_id', receipt)
+        for route in ('/api/upload', '/api/folders', f"/api/logs/{receipt['log_id']}/save",
+                      '/api/ingest/other'):
+            with self.subTest(route=route):
+                response = self.client.post(route, headers={'Authorization': 'Bearer test-ingest-key'})
+                self.assertEqual(response.status_code, 403)
+        browser = self._save()
+        self.assertEqual(browser['status'], 'saved')
+        self.assertNotEqual(browser['id'], receipt['log_id'])
+
+    def test_device_upload_validation_and_size(self):
+        self.assertEqual(self.backend.app.config['MAX_CONTENT_LENGTH'], 500 * 1024 * 1024)
+        receipt = self._device_upload().get_json()
+        self.assertIn('log_id', receipt)
+        before = self.store.get(receipt['log_id'])
+        invalid_fields = [
+            {'display_name': ''}, {'display_name': 'x' * 201}, {'display_name': '../flight'},
+            {'tags': '['}, {'tags': 'null'}, {'tags': '{}'},
+            {'tags': json.dumps(['x'] * 21)}, {'tags': json.dumps(['x' * 41])},
+            {'notes': 'x' * 10001}, {'folder_id': '1'},
+        ]
+        for fields in invalid_fields:
+            with self.subTest(fields=list(fields)):
+                response = self._device_upload(**fields)
+                self.assertEqual(response.status_code, 400)
+                self.assertIn('error', response.get_json())
+        for filename in ('flight.zip', ''):
+            self.assertEqual(self._device_upload(filename=filename).status_code, 400)
+        for data in ({}, MultiDict([
+            ('file', (io.BytesIO(b'first'), 'first.bin')),
+            ('file', (io.BytesIO(b'second'), 'second.bin')),
+        ]), MultiDict([
+            ('file', (io.BytesIO(b'first'), 'first.bin')),
+            ('notes', 'first'), ('notes', 'second'),
+        ])):
+            response = self.client.post('/api/ingest', data=data,
+                                        headers={'Authorization': 'Bearer test-ingest-key'})
+            self.assertEqual(response.status_code, 400)
+        self.backend.app.config['MAX_CONTENT_LENGTH'] = 256
+        oversized = self._device_upload(b'x' * 1024)
+        self.assertEqual(oversized.status_code, 413)
+        self.assertIn('error', oversized.get_json())
+        self.assertEqual(self.store.list_logs(), [before])
+        self.assertEqual(len(list(self.store.files.iterdir())), 1)
+
+    def test_device_upload_storage_error_is_generic(self):
+        with patch.object(self.store, 'ingest_saved', side_effect=OSError('/private/path')):
+            with self.assertLogs(self.backend.app.logger.name, level='ERROR'):
+                response = self._device_upload()
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.get_json(), {'error': 'Catalog request failed'})
+        self.assertNotIn(b'test-ingest-key', response.data)
+        self.assertEqual(self.store.list_logs(), [])
+        malformed = self.client.post(
+            '/api/ingest', headers={'Authorization': 'Bearer test-ingest-key'},
+            content_type='multipart/form-data; boundary=fixture', data=b'--fixture',
+            environ_overrides={'CONTENT_LENGTH': '100'},
+        )
+        self.assertEqual(malformed.status_code, 400)
+        self.assertIn('error', malformed.get_json())
 
     @staticmethod
     def _analysis(filename: str = 'flight.bin') -> dict:

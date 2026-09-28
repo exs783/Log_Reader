@@ -37,6 +37,7 @@ app.config['CATALOG_DIR'] = os.environ.get(
     'CATALOG_DIR', os.path.join(BASE_DIR, 'catalog-data')
 )
 app.config['PUBLIC_ORIGIN'] = os.environ.get('PUBLIC_ORIGIN')
+app.config['INGEST_API_KEY'] = os.environ.get('INGEST_API_KEY')
 
 # ── ArduCopter frame type map ──────────────────────────────────────────────
 FRAME_TYPES = {
