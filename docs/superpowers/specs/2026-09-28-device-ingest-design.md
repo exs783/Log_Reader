@@ -1,6 +1,7 @@
 # Device uploads into the log catalog
 
-Status: written spec approved on 2026-09-28. Implementation plan pending approval.
+Status: approved and implemented locally on `feat/device-ingest` on 2026-09-28.
+Production deployment remains pending.
 
 ## Purpose and scope
 

@@ -66,7 +66,7 @@ returning `(log_id, duplicate)`. `metadata` accepts only `display_name`, `tags`,
 and `notes`; validation raises `CatalogError` with status 400. Keep `initialize()`,
 `ingest()`, `save()`, and public metadata interfaces unchanged.
 
-- [ ] **Step 1: Write focused failing store tests.** Use `CatalogTests` and its
+- [x] **Step 1: Write focused failing store tests.** Use `CatalogTests` and its
   temporary store/fixed clock. Freeze the pre-change version-1 DDL, root folder,
   and `PRAGMA user_version = 1` in the SQL fixture. Seed a saved file, tags, and
   notes directly in that fixture database before invoking the new initializer.
@@ -80,7 +80,7 @@ and `notes`; validation raises `CatalogError` with status 400. Keep `initialize(
   | `test_device_ingest_failure_cleanup` | Inject a read failure: no saved row or partial file. Extend existing active-upload, unlink-failure, and child-abandonment tests to cover `ingest_saved`; cleanup skips the locked upload and later removes abandoned work. After invalid metadata, `assertEqual(store.list_logs(), before)`. |
   | `test_initialize_migrates_v1_without_data_loss` | `assertEqual(version, 2)`; metadata and original bytes match their pre-migration values; `ingest_sha256` is null on old records; repeat initialization succeeds. Update both existing future-schema fixtures from version 2 to 3. |
 
-- [ ] **Step 2: Run the store tests and confirm the expected failure.**
+- [x] **Step 2: Run the store tests and confirm the expected failure.**
 
   ```bash
   "$INGEST_TEST_PYTHON" -m unittest test_catalog test_catalog_deployment
@@ -89,7 +89,7 @@ and `notes`; validation raises `CatalogError` with status 400. Keep `initialize(
   Expected failure: missing `ingest_saved` or missing schema-v2 migration, not a
   broken interpreter or fixture. Existing unrelated tests remain unchanged.
 
-- [ ] **Step 3: Implement schema v2 and `ingest_saved`.** Keep initial v1 creation,
+- [x] **Step 3: Implement schema v2 and `ingest_saved`.** Keep initial v1 creation,
   then apply an explicit transaction that adds nullable `ingest_sha256 TEXT`,
   creates the index below, and sets `PRAGMA user_version = 2`. Reject versions
   greater than 2. No backfill or rewrites of existing log records.
@@ -114,10 +114,10 @@ and `notes`; validation raises `CatalogError` with status 400. Keep `initialize(
   End the transaction before calling cleanup helpers that open their own SQLite
   connections; keep the staging file locked until that cleanup finishes.
 
-- [ ] **Step 4: Rerun the Step 2 command.** Expected result: all store and
+- [x] **Step 4: Rerun the Step 2 command.** Expected result: all store and
   deployment tests pass, including the existing browser-storage lifecycle tests.
 
-- [ ] **Step 5: Commit only Task 1 files.** Commit message:
+- [x] **Step 5: Commit only Task 1 files.** Commit message:
   `feat: store and deduplicate device log imports`.
 
 ## Task 2: Add the authenticated multipart endpoint
@@ -131,7 +131,7 @@ on failure. Register `ingest_log() -> ResponseReturnValue` for
 `POST /api/ingest` within `register_catalog_routes`. Load `INGEST_API_KEY` from
 the environment into Flask config once, alongside existing runtime settings.
 
-- [ ] **Step 1: Write failing endpoint tests.** Extend `CatalogAPITests` config
+- [x] **Step 1: Write failing endpoint tests.** Extend `CatalogAPITests` config
   save/restore with `INGEST_API_KEY` and `MAX_CONTENT_LENGTH`; use the public
   fixture value `test-ingest-key`, never a real key. Add test helper
   `_device_upload(self, content: bytes = b'device bytes', filename: str = 'device.BIN', **fields: str) -> TestResponse`
@@ -146,7 +146,7 @@ the environment into Flask config once, alongside existing runtime settings.
   | `test_device_upload_validation_and_size` | Assert the normal configured limit is `500 * 1024 * 1024`. Valid-key request with the reduced limit returns JSON 413. Missing file, `.zip`, malformed/non-array tags, unknown `folder_id`, blank/over-200 name, over-20/over-40 tags, and over-10,000 notes return 400. Invalid duplicate metadata also returns 400 without mutation. |
   | `test_device_upload_storage_error_is_generic` | Inject storage failure: `assertEqual(response.status_code, 500)`; JSON error contains neither injected private path nor fixture token; no success receipt. Malformed multipart errors retain JSON 400 rather than becoming 500. |
 
-- [ ] **Step 2: Run the API tests and confirm expected failures.**
+- [x] **Step 2: Run the API tests and confirm expected failures.**
 
   ```bash
   "$INGEST_TEST_PYTHON" -m unittest test_catalog_api
@@ -154,7 +154,7 @@ the environment into Flask config once, alongside existing runtime settings.
 
   Expected failures: endpoint missing or blocked by the current origin guard.
 
-- [ ] **Step 3: Implement the route and key guard.** Read only
+- [x] **Step 3: Implement the route and key guard.** Read only
   `app.config.get('INGEST_API_KEY')` in the guard so an empty config cannot fall back
   to an ambient secret. Use `secrets.compare_digest` on encoded tokens. Exempt
   only exact `POST /api/ingest` from `require_same_origin`; its route must call
@@ -168,7 +168,7 @@ the environment into Flask config once, alongside existing runtime settings.
   codes with JSON errors, including 400 and 413. Keep generic storage errors
   generic and never log request authorization headers or form bodies.
 
-- [ ] **Step 4: Run focused API and browser-upload regression tests.**
+- [x] **Step 4: Run focused API and browser-upload regression tests.**
 
   ```bash
   "$INGEST_TEST_PYTHON" -m unittest test_catalog_api test_uploads
@@ -177,7 +177,7 @@ the environment into Flask config once, alongside existing runtime settings.
   Expected result: all tests pass; browser uploads still analyze and expire
   rather than automatically saving or deduplicating.
 
-- [ ] **Step 5: Commit only Task 2 files.** Commit message:
+- [x] **Step 5: Commit only Task 2 files.** Commit message:
   `feat: add upload-only device ingestion endpoint`.
 
 ## Task 3: Wire deployment configuration and document the uploader contract
@@ -189,7 +189,7 @@ the environment into Flask config once, alongside existing runtime settings.
 The nginx server include retains browser Basic Auth and adds only
 `location = /api/ingest` with `auth_basic off`. The device uses the Task 2 contract.
 
-- [ ] **Step 1: Write failing configuration tests.** In
+- [x] **Step 1: Write failing configuration tests.** In
   `CatalogDeploymentTests`, override `INGEST_API_KEY` in subprocess environments
   with a fixture key or empty string, never inherit a production value. Add
   `test_wsgi_ingest_key_configuration`: a temporary WSGI catalog accepts the
@@ -200,7 +200,7 @@ The nginx server include retains browser Basic Auth and adds only
   exactly one `location = /api/ingest`, one `auth_basic off`, unchanged outer
   Basic Auth directives, and no new `location /`.
 
-- [ ] **Step 2: Run deployment tests and confirm expected failures.**
+- [x] **Step 2: Run deployment tests and confirm expected failures.**
 
   ```bash
   "$INGEST_TEST_PYTHON" -m unittest test_catalog_deployment
@@ -209,7 +209,7 @@ The nginx server include retains browser Basic Auth and adds only
   Expected failure: missing Compose key and nginx exception. Configuration
   tests are not a substitute for the live auth checks documented below.
 
-- [ ] **Step 3: Add the runtime wiring and operator documentation.** In the exact
+- [x] **Step 3: Add the runtime wiring and operator documentation.** In the exact
   nginx location preserve `proxy_pass http://127.0.0.1:18765`, HTTP/1.1, Host and
   existing forwarded headers, and 600-second read/send timeouts. Explicitly
   forward `Authorization`; disable proxy caching. Retain the server's existing
@@ -241,7 +241,7 @@ The nginx server include retains browser Basic Auth and adds only
   not code preparation. Use the wizard skill only if human credential/sudo steps
   are needed. Never use Docker privileges to bypass missing sudo access.
 
-- [ ] **Step 4: Run the final focused checks.** From `log-dashboard`:
+- [x] **Step 4: Run the final focused checks.** From `log-dashboard`:
 
   ```bash
   "$INGEST_TEST_PYTHON" -m unittest test_catalog test_catalog_api test_uploads test_catalog_deployment
@@ -259,7 +259,7 @@ The nginx server include retains browser Basic Auth and adds only
   installs, broad test expansion, production uploads, or secret dumps. Report
   live deployment/auth verification as pending, not completed.
 
-- [ ] **Step 5: Commit only Task 3 files and hand off.** Commit message:
+- [x] **Step 5: Commit only Task 3 files and hand off.** Commit message:
   `feat: wire and document device ingestion deployment`. Report tested local
   behavior, commit IDs, and the separate deployment prerequisites. Do not merge,
   push, open a PR, or deploy unless requested for this feature.
@@ -271,9 +271,21 @@ folder selection, resumable transfers, queues, quotas, and automated backups.
 Existing worker/proxy limits remain. Do not add review agents unless the user
 explicitly asks for a review.
 
-## Execution choice
+## Execution results, 2026-09-28
 
-Recommend native execution for three sequential tasks that share the same
-store and route interfaces. Subagent-driven execution remains available if
-the user chooses it; preserve the no-unrequested-review constraint either way.
-Wait for approval of this written plan and the execution choice before coding.
+The user approved native execution. All three tasks are implemented in
+`.worktrees/device-ingest` on `feat/device-ingest`, starting from `c310e6b`.
+Implementation commits are `269dcbd`, `766e022`, `4b21266`, and `6cdda9a`.
+No review cycles, push, PR, merge, or live deployment were performed.
+
+All 62 focused tests passed. Both backend modules passed mypy, Compose config
+validated, and `git diff --check` passed. Tests used temporary catalogs and
+fixture-only credentials; existing uploads and live catalog data were untouched.
+The machine setup guide records the new development worktree, not activation.
+
+Ruling: replaced nginx source-text assertions with a real isolated nginx/Flask
+authentication test. It proves valid-key ingestion and continued Basic Auth on
+other paths. Cost if wrong: adjust the test fixture, no production changes.
+
+Live activation still needs a privately provisioned key, a consistent backup
+before schema migration, and the README's nginx/container verification steps.
