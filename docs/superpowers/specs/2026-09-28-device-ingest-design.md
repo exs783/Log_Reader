@@ -1,6 +1,6 @@
 # Device uploads into the log catalog
 
-Status: conversational design approved. Written spec awaiting user approval.
+Status: written spec approved on 2026-09-28. Implementation plan pending approval.
 
 ## Purpose and scope
 
@@ -35,7 +35,8 @@ An explicitly empty name is invalid.
 
 Retain the existing 500 MB request limit, currently `500 * 1024 * 1024` bytes.
 This includes multipart overhead, not just file bytes. Accept only the two
-listed extensions and never decompress uploads. Do not run analysis or generate text during ingestion.
+listed extensions and never decompress uploads. Do not run analysis or generate
+text during ingestion.
 A successful receipt confirms storage, not that the bytes parse as a valid log.
 
 Responses contain only the receipt, not other catalog metadata:
