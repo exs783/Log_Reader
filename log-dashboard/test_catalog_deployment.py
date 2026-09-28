@@ -116,7 +116,7 @@ class CatalogDeploymentTests(unittest.TestCase):
         store = CatalogStore(self.root)
         store.initialize()
         with sqlite3.connect(store.database) as connection:
-            connection.execute('PRAGMA user_version = 2')
+            connection.execute('PRAGMA user_version = 3')
 
         completed = subprocess.run(
             [sys.executable, '-c', 'import wsgi'],

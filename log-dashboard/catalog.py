@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import datetime as dt
 import fcntl
+import hashlib
 import logging
 import os
 import re
@@ -53,7 +54,7 @@ class CatalogStore:
         os.chmod(self.database, 0o600)
         with self._connect() as connection:
             version = connection.execute('PRAGMA user_version').fetchone()[0]
-            if version > 1:
+            if version > 2:
                 raise CatalogError('Unsupported catalog schema version', 500)
             if version == 0:
                 connection.executescript(
@@ -115,6 +116,15 @@ class CatalogStore:
                 )
                 connection.execute('PRAGMA user_version = 1')
                 connection.commit()
+            connection.execute('BEGIN IMMEDIATE')
+            if connection.execute('PRAGMA user_version').fetchone()[0] == 1:
+                connection.execute('ALTER TABLE logs ADD COLUMN ingest_sha256 TEXT')
+                connection.execute(
+                    '''CREATE UNIQUE INDEX logs_ingest_sha256 ON logs(ingest_sha256)
+                       WHERE ingest_sha256 IS NOT NULL AND status = 'saved' '''
+                )
+                connection.execute('PRAGMA user_version = 2')
+            connection.commit()
 
     @staticmethod
     def _extension(filename: str) -> str:
@@ -123,12 +133,8 @@ class CatalogStore:
             return suffix.lower()
         return '.bin'
 
-    def ingest(
-        self,
-        source: BinaryIO,
-        original_filename: str,
-        analyze: Callable[[str, str], dict],
-    ) -> tuple[dict, dict]:
+    @contextlib.contextmanager
+    def _staged_file(self, original_filename: str) -> Iterator[tuple[str, Path, BinaryIO]]:
         log_id = str(uuid.uuid4())
         file_key = f'{log_id}{self._extension(original_filename)}'
         path = self.files / file_key
@@ -150,6 +156,31 @@ class CatalogStore:
                 )
                 connection.commit()
             published = True
+            yield log_id, path, handle
+        except BaseException:
+            self._discard_staging(log_id if published else None, path)
+            raise
+        finally:
+            handle.close()
+
+    def _discard_staging(self, log_id: str | None, path: Path) -> None:
+        if log_id is not None:
+            self._mark_deleting(log_id)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            logger.exception('Could not unlink failed catalog ingest %s', path)
+        else:
+            if log_id is not None:
+                self._remove_row(log_id)
+
+    def ingest(
+        self,
+        source: BinaryIO,
+        original_filename: str,
+        analyze: Callable[[str, str], dict],
+    ) -> tuple[dict, dict]:
+        with self._staged_file(original_filename) as (log_id, path, handle):
             shutil.copyfileobj(source, handle)
             handle.flush()
             size_bytes = handle.tell()
@@ -166,19 +197,66 @@ class CatalogStore:
                 )
                 connection.commit()
             return analysis, self._metadata_for_id(log_id)
-        except BaseException:
-            if published:
-                self._mark_deleting(log_id)
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                logger.exception('Could not unlink failed catalog ingest %s', path)
-            else:
-                if published:
-                    self._remove_row(log_id)
-            raise
-        finally:
-            handle.close()
+
+    def ingest_saved(
+        self, source: BinaryIO, original_filename: str, metadata: dict,
+    ) -> tuple[str, bool]:
+        if not isinstance(metadata, dict) or not set(metadata).issubset(
+            {'display_name', 'tags', 'notes'}
+        ):
+            raise CatalogError('Invalid metadata', 400)
+        display_name = (
+            self._name(metadata['display_name'], 200, 'display name')
+            if 'display_name' in metadata else None
+        )
+        tags = self._tags(metadata.get('tags', []))
+        notes = metadata.get('notes', '')
+        if not isinstance(notes, str) or len(notes) > 10_000:
+            raise CatalogError('Invalid notes', 400)
+
+        with self._staged_file(original_filename) as (log_id, path, handle):
+            digest = hashlib.sha256()
+            while chunk := source.read(1024 * 1024):
+                handle.write(chunk)
+                digest.update(chunk)
+            handle.flush()
+            now = self.clock()
+            if display_name is None:
+                timestamp = dt.datetime.fromtimestamp(now, dt.UTC).strftime('%Y-%m-%d_%H-%M-%SZ')
+                display_name = f'{timestamp}-{log_id[:8]}'
+            with self._connect() as connection:
+                connection.execute('BEGIN IMMEDIATE')
+                existing = connection.execute(
+                    "SELECT id FROM logs WHERE ingest_sha256 = ? AND status = 'saved'",
+                    (digest.hexdigest(),),
+                ).fetchone()
+                if existing is None:
+                    connection.execute(
+                        '''INSERT OR IGNORE INTO folders(parent_id, name, created_at)
+                           VALUES (1, 'Device uploads', ?)''', (now,),
+                    )
+                    folder_id = connection.execute(
+                        "SELECT id FROM folders WHERE parent_id = 1 AND name = 'Device uploads'"
+                    ).fetchone()['id']
+                    connection.execute(
+                        '''UPDATE logs SET size_bytes = ?, ingest_sha256 = ?,
+                               status = 'saved', saved_at = ?, updated_at = ?,
+                               folder_id = ?, display_name = ?, notes = ?
+                           WHERE id = ? AND status = 'processing' ''',
+                        (handle.tell(), digest.hexdigest(), now, now,
+                         folder_id, display_name, notes, log_id),
+                    )
+                    for tag in tags:
+                        connection.execute('INSERT OR IGNORE INTO tags(name) VALUES (?)', (tag,))
+                        connection.execute(
+                            '''INSERT INTO log_tags(log_id, tag_id)
+                               SELECT ?, id FROM tags WHERE name = ?''', (log_id, tag),
+                        )
+                connection.commit()
+            if existing is not None:
+                self._discard_staging(log_id, path)
+                return existing['id'], True
+            return log_id, False
 
     def save(self, log_id: str, metadata: dict) -> dict:
         with self._connect() as connection:

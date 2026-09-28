@@ -13,14 +13,16 @@ from unittest import mock
 from catalog import CatalogError, CatalogStore
 
 
-def abandon_ingest(root, now):
+def abandon_ingest(root, now, device=False):
     class ExitReader:
         def read(self, size=-1):
             os._exit(0)
 
-    CatalogStore(Path(root), clock=lambda: now).ingest(
-        ExitReader(), 'abandoned.bin', lambda path, name: {'success': True}
-    )
+    store = CatalogStore(Path(root), clock=lambda: now)
+    if device:
+        store.ingest_saved(ExitReader(), 'abandoned.bin', {})
+    else:
+        store.ingest(ExitReader(), 'abandoned.bin', lambda path, name: {'success': True})
 
 
 class CatalogTests(unittest.TestCase):
@@ -36,6 +38,129 @@ class CatalogTests(unittest.TestCase):
         return self.store.ingest(
             io.BytesIO(content), filename, lambda path, name: {'success': True}
         )[1]
+
+    def test_device_ingest_saved_and_retry_unchanged(self):
+        content = b'original device bytes'
+        log_id, duplicate = self.store.ingest_saved(
+            io.BytesIO(content), '../../flight.BIN', {'tags': [' Hover ', 'hover']}
+        )
+        self.assertFalse(duplicate)
+        saved = self.store.get(log_id)
+        self.assertEqual(saved['display_name'], f'2027-01-15_08-00-00Z-{log_id[:8]}')
+        self.assertEqual(saved['tags'], ['hover'])
+        self.assertIsNone(saved['expires_at'])
+        self.assertEqual(saved['status'], 'saved')
+        self.assertEqual(saved['notes'], '')
+        self.assertEqual(saved['size_bytes'], len(content))
+        self.assertEqual(self.store.list_folders()[-1]['name'], 'Device uploads')
+        with self.store.use_file(log_id) as (path, _):
+            self.assertEqual(path, self.store.files / f'{log_id}.bin')
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(path.read_bytes(), content)
+        before = self.store.edit(log_id, {'display_name': 'Team name', 'notes': 'Keep'})
+        self.now += 7200
+        self.assertEqual(self.store.ingest_saved(
+            io.BytesIO(content), 'renamed.log', {'display_name': 'Overwrite', 'tags': []}
+        ), (log_id, True))
+        restarted = CatalogStore(self.root, clock=lambda: self.now)
+        restarted.initialize()
+        restarted.cleanup()
+        self.assertEqual(restarted.get(log_id), before)
+        self.assertEqual(len(list(restarted.files.iterdir())), 1)
+        browser = self.store.save(self.ingest(content)['id'], {'display_name': 'Browser'})
+        self.assertNotEqual(browser['id'], log_id)
+        self.assertEqual(len(self.store.list_logs()), 2)
+
+    def test_device_ingest_concurrent_duplicates(self):
+        barrier = threading.Barrier(2)
+
+        class SimultaneousSource(io.BytesIO):
+            def read(self, size=-1):
+                if self.tell() == 0:
+                    barrier.wait(5)
+                return super().read(size)
+
+        def upload():
+            store = CatalogStore(self.root, clock=lambda: self.now)
+            return store.ingest_saved(SimultaneousSource(b'same'), 'flight.bin', {})
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            receipts = list(executor.map(lambda _: upload(), range(2)))
+        self.assertEqual(len({receipt[0] for receipt in receipts}), 1)
+        self.assertEqual(sorted(receipt[1] for receipt in receipts), [False, True])
+        self.assertEqual(len(self.store.list_logs()), 1)
+        self.assertEqual(len(list(self.store.files.iterdir())), 1)
+        different_id, duplicate = self.store.ingest_saved(io.BytesIO(b'other'), 'flight.bin', {})
+        self.assertFalse(duplicate)
+        self.assertNotEqual(different_id, receipts[0][0])
+
+    def test_device_ingest_folder_and_delete_lifecycle(self):
+        first_id, _ = self.store.ingest_saved(io.BytesIO(b'first'), 'flight.bin', {})
+        old_folder = self.store.get(first_id)['folder_id']
+        self.store.rename_folder(old_folder, 'Archived')
+        moved = self.store.edit(first_id, {'folder_id': 1})
+        self.assertEqual(self.store.ingest_saved(io.BytesIO(b'first'), 'flight.bin', {}),
+                         (first_id, True))
+        self.assertEqual(self.store.get(first_id), moved)
+        second_id, _ = self.store.ingest_saved(io.BytesIO(b'second'), 'flight.bin', {})
+        new_folder = self.store.get(second_id)['folder_id']
+        self.assertNotEqual(new_folder, old_folder)
+        self.assertIn({'id': new_folder, 'parent_id': 1, 'name': 'Device uploads',
+                       'created_at': '2027-01-15T08:00:00Z'}, self.store.list_folders())
+        self.store.delete(first_id)
+        new_id, duplicate = self.store.ingest_saved(io.BytesIO(b'first'), 'flight.bin', {})
+        self.assertFalse(duplicate)
+        self.assertNotEqual(new_id, first_id)
+
+    def test_device_ingest_failure_cleanup(self):
+        class BrokenSource(io.BytesIO):
+            def read(self, size=-1):
+                if self.tell():
+                    raise OSError('read failed')
+                return super().read(2)
+
+        with self.assertRaises(OSError):
+            self.store.ingest_saved(BrokenSource(b'partial'), 'flight.bin', {})
+        self.assertEqual(list(self.store.files.iterdir()), [])
+        self.assertEqual(self.store.list_logs(), [])
+        with mock.patch.object(Path, 'unlink', side_effect=OSError('injected')):
+            with self.assertLogs('catalog', level='ERROR'):
+                with self.assertRaises(OSError):
+                    self.store.ingest_saved(BrokenSource(b'partial'), 'flight.bin', {})
+        self.assertEqual(self.store.cleanup(), {'removed': 1, 'skipped': 0, 'failed': 0})
+        first_id, _ = self.store.ingest_saved(io.BytesIO(b'keep'), 'flight.bin', {})
+        before = self.store.get(first_id)
+        for metadata in ({'display_name': ''}, {'folder_id': 1}, {'tags': 'bad'}, {'notes': 7}):
+            with self.subTest(metadata=metadata), self.assertRaises(CatalogError) as error:
+                self.store.ingest_saved(io.BytesIO(b'keep'), 'flight.bin', metadata)
+            self.assertEqual(error.exception.status_code, 400)
+        self.assertEqual(self.store.list_logs(), [before])
+        self.assertEqual(len(list(self.store.files.iterdir())), 1)
+
+    def test_initialize_migrates_v1_without_data_loss(self):
+        old = CatalogStore(self.root / 'old', clock=lambda: self.now)
+        old.files.mkdir(parents=True)
+        fixture = Path(__file__).with_name('test_fixtures') / 'catalog_v1.sql'
+        log_id = '11111111-1111-4111-8111-111111111111'
+        key = f'{log_id}.bin'
+        (old.files / key).write_bytes(b'keep')
+        with sqlite3.connect(old.database) as connection:
+            connection.executescript(fixture.read_text())
+            connection.execute(
+                "INSERT INTO logs VALUES (?, ?, 'old.bin', 4, ?, 'saved', NULL, ?, ?, 1, 'Old flight', 'Old notes')",
+                (log_id, key, self.now, self.now, self.now),
+            )
+            connection.execute("INSERT INTO tags VALUES (1, 'old-tag')")
+            connection.execute('INSERT INTO log_tags VALUES (?, 1)', (log_id,))
+        before = old.get(log_id)
+        old.initialize()
+        old.initialize()
+        self.assertEqual(old.get(log_id), before)
+        with old.use_file(log_id) as (path, _):
+            self.assertEqual(path.read_bytes(), b'keep')
+        with sqlite3.connect(old.database) as connection:
+            self.assertEqual(connection.execute('PRAGMA user_version').fetchone()[0], 2)
+            self.assertIsNone(connection.execute('SELECT ingest_sha256 FROM logs').fetchone()[0])
 
     def test_saved_original_survives_expiry_and_restart(self):
         analysis, temporary = self.store.ingest(
@@ -299,8 +424,14 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(expired.exception.status_code, 404)
 
     def test_cleanup_removes_processing_row_abandoned_by_child(self):
+        self._assert_abandoned_cleanup(device=False)
+
+    def test_cleanup_removes_abandoned_device_upload(self):
+        self._assert_abandoned_cleanup(device=True)
+
+    def _assert_abandoned_cleanup(self, *, device):
         process = multiprocessing.get_context('fork').Process(
-            target=abandon_ingest, args=(self.root, self.now)
+            target=abandon_ingest, args=(self.root, self.now, device)
         )
         process.start()
         process.join(5)
@@ -313,6 +444,12 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(list((self.root / 'files').iterdir()), [])
 
     def test_cleanup_skips_active_processing_file(self):
+        self._assert_active_cleanup(device=False)
+
+    def test_cleanup_skips_active_device_upload(self):
+        self._assert_active_cleanup(device=True)
+
+    def _assert_active_cleanup(self, *, device):
         started = threading.Event()
         release = threading.Event()
 
@@ -324,18 +461,19 @@ class CatalogTests(unittest.TestCase):
 
         with ThreadPoolExecutor(max_workers=1) as executor:
             ingest = executor.submit(
-                self.store.ingest,
+                self.store.ingest_saved if device else self.store.ingest,
                 PausingSource(b'active'),
                 'active.bin',
-                lambda path, name: {'success': True},
+                {} if device else lambda path, name: {'success': True},
             )
             self.assertTrue(started.wait(5))
             self.assertEqual(
                 self.store.cleanup(), {'removed': 0, 'skipped': 1, 'failed': 0}
             )
             release.set()
-            _, temporary = ingest.result(5)
-        self.assertEqual(temporary['status'], 'temporary')
+            result = ingest.result(5)
+        metadata = self.store.get(result[0]) if device else result[1]
+        self.assertEqual(metadata['status'], 'saved' if device else 'temporary')
 
     def test_delete_unlink_failure_is_retried_by_cleanup(self):
         saved = self.store.save(self.ingest(content=b'retry')['id'], {
@@ -402,7 +540,7 @@ class CatalogTests(unittest.TestCase):
         future_root.mkdir()
         database = future_root / 'catalog.sqlite3'
         with sqlite3.connect(database) as connection:
-            connection.execute('PRAGMA user_version = 2')
+            connection.execute('PRAGMA user_version = 3')
 
         with self.assertRaises(CatalogError) as error:
             CatalogStore(future_root, clock=lambda: self.now).initialize()
