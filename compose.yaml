@@ -7,6 +7,7 @@ services:
     environment:
       CATALOG_DIR: /app/catalog-data
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:18765}
+      INGEST_API_KEY: ${INGEST_API_KEY:-}
     volumes:
       - ./log-dashboard/uploads:/app/uploads
       - ./log-dashboard/catalog-data:/app/catalog-data
