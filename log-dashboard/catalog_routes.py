@@ -6,7 +6,7 @@ import secrets
 from contextlib import ExitStack
 from functools import wraps
 from pathlib import Path
-from typing import Callable, Iterator, ParamSpec, cast
+from typing import BinaryIO, Callable, Iterator, ParamSpec, cast
 
 from flask import Flask, Response, current_app, jsonify, request, send_file
 from flask.typing import ResponseReturnValue
@@ -134,7 +134,9 @@ def register_catalog_routes(
                 metadata['tags'] = json.loads(metadata['tags'])
             except ValueError as error:
                 raise CatalogError('Invalid tags', 400) from error
-        log_id, duplicate = get_catalog().ingest_saved(file.stream, file.filename, metadata)
+        log_id, duplicate = get_catalog().ingest_saved(
+            cast(BinaryIO, file.stream), file.filename, metadata,
+        )
         return jsonify({'success': True, 'log_id': log_id, 'duplicate': duplicate}), (
             200 if duplicate else 201
         )
