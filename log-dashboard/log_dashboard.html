@@ -73,6 +73,7 @@
         }
 
         *, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+        [hidden] { display: none !important; }
         html { scroll-behavior: smooth; }
         body {
             font-family: var(--font);
@@ -434,6 +435,57 @@
             font-size: 13px;
         }
 
+        button, input, select, textarea { font: inherit; }
+        .mode-selector { display: flex; gap: 4px; }
+        .mode-btn, .secondary-btn, .danger-btn {
+            min-height: 38px;
+            padding: 8px 14px;
+            border: 1px solid var(--border-2);
+            border-radius: 8px;
+            background: var(--surface);
+            color: var(--text);
+            cursor: pointer;
+            font-weight: 600;
+        }
+        .mode-btn.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+        .secondary-btn:disabled, .danger-btn:disabled { opacity: .5; cursor: not-allowed; }
+        .danger-btn { color: var(--red); }
+        .catalog-panel { max-width: 1100px; margin: 0 auto; padding: 28px 28px 60px; }
+        .catalog-toolbar, .catalog-actions, .form-actions {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            align-items: center;
+        }
+        .catalog-toolbar { margin-bottom: 16px; }
+        .catalog-toolbar input, .catalog-toolbar select { min-height: 40px; padding: 8px; }
+        .catalog-log { margin-bottom: 12px; }
+        .catalog-log h3 { margin-bottom: 6px; }
+        .catalog-meta, .catalog-notes, .catalog-breadcrumb { color: var(--text-dim); margin-bottom: 10px; }
+        .catalog-actions a { color: var(--accent); font-weight: 600; }
+        dialog {
+            width: min(560px, calc(100% - 32px));
+            margin: auto;
+            padding: 22px;
+            border: 1px solid var(--border-2);
+            border-radius: 12px;
+            background: var(--surface);
+            color: var(--text);
+        }
+        dialog::backdrop { background: rgba(0, 0, 0, .48); }
+        dialog h2 { margin-bottom: 16px; }
+        .catalog-form { display: grid; gap: 14px; }
+        .catalog-form label { display: grid; gap: 6px; font-weight: 600; }
+        .catalog-form input, .catalog-form select, .catalog-form textarea {
+            width: 100%;
+            padding: 9px;
+            border: 1px solid var(--border-2);
+            border-radius: 7px;
+            background: var(--surface);
+            color: var(--text);
+        }
+        .catalog-form textarea { min-height: 110px; resize: vertical; }
+
         footer {
             text-align: center;
             padding: 24px 20px;
@@ -454,17 +506,69 @@
             </div>
         </div>
         <div class="header-right">
+            <div class="mode-selector" aria-label="Dashboard view">
+                <button id="show-analyzer" class="mode-btn active" type="button">Analyzer</button>
+                <button id="show-catalog" class="mode-btn" type="button">Catalog</button>
+            </div>
             <div class="header-status" id="backend-status"><span class="status-dot" id="backend-status-dot"></span><span id="backend-status-text">Checking backend&hellip;</span></div>
         </div>
     </header>
 
+    <main id="analyzer-panel">
     <div class="upload-section">
         <div class="file-input-wrapper">
             <label class="file-input-label" for="log-file">Load log file</label>
             <input type="file" id="log-file" accept=".bin,.log" />
         </div>
         <div class="upload-info" id="upload-status" role="status" aria-live="polite">Awaiting input &mdash; .bin / .log</div>
+        <button id="save-to-catalog" class="secondary-btn" type="button" disabled>Save to catalog</button>
+        <div class="upload-info" id="temporary-expiry"></div>
     </div>
+    </main>
+
+    <main id="catalog-panel" class="catalog-panel" hidden>
+        <h2 class="section-title">Log catalog</h2>
+        <div id="catalog-alert" class="alert alert-danger" hidden role="alert"></div>
+        <div class="catalog-breadcrumb" id="catalog-breadcrumb">Logs</div>
+        <div class="catalog-toolbar">
+            <label>Name <input id="catalog-name-filter" type="search"></label>
+            <label>Tag <select id="catalog-tag-filter"><option value="">All tags</option></select></label>
+            <label>Folder <select id="catalog-folder-filter"><option value="">All folders</option></select></label>
+            <button id="create-folder" class="secondary-btn" type="button">Create folder</button>
+            <button id="rename-folder" class="secondary-btn" type="button" disabled>Rename folder</button>
+            <button id="delete-folder" class="danger-btn" type="button" disabled>Delete folder</button>
+        </div>
+        <div id="catalog-list"></div>
+    </main>
+
+    <dialog id="log-dialog">
+        <h2 id="log-dialog-title">Save to catalog</h2>
+        <form id="log-form" class="catalog-form">
+            <label>Log name <input id="log-name" name="display_name" maxlength="200" required></label>
+            <label>Folder <select id="log-folder" name="folder_id"></select></label>
+            <label>Tags <input id="log-tags" name="tags" aria-describedby="tags-help"></label>
+            <div id="tags-help" class="upload-info">Comma-separated</div>
+            <label>Notes <textarea id="log-notes" name="notes" maxlength="10000"></textarea></label>
+            <div id="log-form-error" class="alert alert-danger" hidden role="alert"></div>
+            <div class="form-actions">
+                <button class="file-input-label" type="submit">Save log</button>
+                <button id="cancel-log" class="secondary-btn" type="button">Cancel</button>
+            </div>
+        </form>
+    </dialog>
+
+    <dialog id="folder-dialog">
+        <h2 id="folder-dialog-title">Create folder</h2>
+        <form id="folder-form" class="catalog-form">
+            <label>Folder name <input id="folder-name" maxlength="120" required></label>
+            <label id="folder-parent-label">Parent folder <select id="folder-parent"></select></label>
+            <div id="folder-form-error" class="alert alert-danger" hidden role="alert"></div>
+            <div class="form-actions">
+                <button class="file-input-label" type="submit">Save folder</button>
+                <button id="cancel-folder" class="secondary-btn" type="button">Cancel</button>
+            </div>
+        </form>
+    </dialog>
     <div id="upload-alert" class="alert alert-danger" style="display:none; margin:0 32px;" role="alert"></div>
 
     <nav role="tablist" aria-label="Log analysis sections">
@@ -685,7 +789,7 @@
     <footer>&copy; 2026 &mdash; Pixhawk Log Analyzer &mdash; CWRU VTOL</footer>
 
     <script>
-        const API_URL = 'https://vtollogs.williserdman.com/api';
+        const API_URL = '/api';
         let currentData = null;
         let currentSummary = null;
 
@@ -778,6 +882,7 @@
             const fileInput = e.target;
             const uploadLabel = document.querySelector('.file-input-label');
             const statusEl = document.getElementById('upload-status');
+            window.logCatalog.cleared();
             hideAlert('upload-alert');
             statusEl.textContent = `Uploading ${file.name}...`;
             statusEl.classList.add('loading');
@@ -799,32 +904,16 @@
                 const data = await response.json();
                 if (!data.success) throw new Error(data.error || 'Upload failed');
 
-                currentData = data.analyses;
-                currentSummary = data.summary;
-
                 statusEl.textContent = `Loaded: ${file.name}`;
                 statusEl.classList.remove('loading');
-
-                // Enable nav buttons
-                document.querySelectorAll('.nav-btn').forEach(btn => btn.disabled = false);
-                hideAlert('global-alert');
-
-                // Show overview
-                document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
-                document.querySelectorAll('.nav-btn').forEach(btn => {
-                    btn.classList.remove('active');
-                    btn.setAttribute('aria-selected', 'false');
-                });
-                document.getElementById('overview').classList.add('active');
-                const overviewTab = document.getElementById('tab-overview');
-                overviewTab.classList.add('active');
-                overviewTab.setAttribute('aria-selected', 'true');
-                showOverviewPage();
+                displayAnalysis(data);
+                window.logCatalog.uploaded(data);
             } catch (error) {
                 // A failed upload must not leave the previous flight's data on screen
                 // looking current — clear it and lock the nav back to the pre-upload state.
                 currentData = null;
                 currentSummary = null;
+                window.logCatalog.cleared();
                 document.querySelectorAll('.nav-btn').forEach(btn => {
                     btn.disabled = true;
                     btn.classList.remove('active');
@@ -845,6 +934,23 @@
                 fileInput.value = '';
             }
         });
+
+        function displayAnalysis(result) {
+            currentData = result.analyses;
+            currentSummary = result.summary;
+            document.querySelectorAll('.nav-btn').forEach(button => {
+                button.disabled = false;
+                button.classList.remove('active');
+                button.setAttribute('aria-selected', 'false');
+            });
+            document.querySelectorAll('.page').forEach(page => page.classList.remove('active'));
+            document.getElementById('overview').classList.add('active');
+            const overviewTab = document.getElementById('tab-overview');
+            overviewTab.classList.add('active');
+            overviewTab.setAttribute('aria-selected', 'true');
+            hideAlert('global-alert');
+            showOverviewPage();
+        }
 
         // Page navigation
         function showPage(pageId, evt) {
@@ -1611,5 +1717,6 @@
             }
         }
     </script>
+    <script src="/catalog.js"></script>
 </body>
 </html>

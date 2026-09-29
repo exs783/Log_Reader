@@ -1,6 +1,9 @@
 .git
 .venv
+.catalog-test/
+.playwright-browsers/
 **/__pycache__
 **/*.pyc
+log-dashboard/catalog-data/
 log-dashboard/uploads/*
 mission-model

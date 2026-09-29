@@ -1,1 +1,6 @@
 .worktrees/
+log-dashboard/catalog-data/
+.catalog-test/
+.playwright-browsers/
+**/__pycache__/
+**/*.pyc

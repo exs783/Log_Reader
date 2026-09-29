@@ -1,11 +1,17 @@
 services:
   log-reader:
+    image: ${COMPOSE_PROJECT_NAME}-log-reader
     build:
       context: .
     ports:
       - "127.0.0.1:18765:8000"
+    environment:
+      CATALOG_DIR: /app/catalog-data
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:18765}
+      INGEST_API_KEY: ${INGEST_API_KEY:-}
     volumes:
       - ./log-dashboard/uploads:/app/uploads
+      - ./log-dashboard/catalog-data:/app/catalog-data
     restart: unless-stopped
     init: true
     healthcheck:
@@ -18,3 +24,23 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  cleanup:
+    image: ${COMPOSE_PROJECT_NAME}-log-reader
+    command:
+      - sh
+      - -ec
+      - |
+        trap 'exit 0' TERM INT
+        while true; do
+          python catalog.py cleanup --data-dir /app/catalog-data
+          sleep 300 &
+          wait
+        done
+    volumes:
+      - ./log-dashboard/catalog-data:/app/catalog-data
+    depends_on:
+      log-reader:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
