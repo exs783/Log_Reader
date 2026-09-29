@@ -26,7 +26,12 @@ docker compose up -d --build
 ```
 
 Open `http://localhost:18765`. The Compose port is loopback-only. Existing legacy
-files in `log-dashboard/uploads` stay available through the legacy API.
+files in `log-dashboard/uploads` stay available through the legacy API. Compose
+also starts the `cleanup` service after `log-reader` is healthy. It uses the same
+image and catalog-data bind mount. It immediately runs
+`python catalog.py cleanup --data-dir /app/catalog-data`, then repeats every five
+minutes with an `unless-stopped` restart policy. It exposes no port and does not
+receive the ingestion key.
 
 ## Catalog behavior
 
@@ -130,9 +135,9 @@ provision a key, migrate production data, or reload any service.
    `/home/willis/.config/log-reader/ingest.env`, owned by the deployment operator,
    mode 0600, containing `INGEST_API_KEY=<private-value>`. Do not use a real value
    in command history or commit the file. No per-device key management is provided.
-2. Follow the backup procedure below before the first deployment. Pause only
-   the marked cleanup job, stop the application, and archive the database and
-   files together. The new application upgrades schema version 1 to 2 without
+2. Follow the backup procedure below before the first deployment. Stop both
+   Compose services, then archive the database and files together. The new
+   application upgrades schema version 1 to 2 without
    changing existing entries. The old image rejects version 2: image-only rollback
    is unsupported. Restoring a backup needs confirmation and must preserve newer
    data separately.
@@ -146,8 +151,7 @@ provision a key, migrate production data, or reload any service.
 
    Copy the updated `deploy/catalog-nginx.conf` into the existing nginx snippet,
    run `sudo nginx -t`, then reload nginx. Keep the existing catch-all proxy,
-   500 MB body limit, TLS configuration, Basic Auth file, and cleanup schedule.
-   Restore the marked cleanup job after activation. Every later Compose
+   500 MB body limit, TLS configuration, and Basic Auth file. Every later Compose
    recreation must include the private env file; omitting it disables ingestion.
 4. Through HTTPS, verify missing/wrong keys fail, a valid upload returns 201,
    and its repeat returns 200 with the same ID. Ordinary routes still require
@@ -223,12 +227,11 @@ or replace the existing HTTP-to-HTTPS redirect.
    The application never trusts arbitrary forwarded headers as its write origin.
    Confirm `docker compose ps` reports healthy before continuing.
 
-5. Verify the Docker path with `command -v docker`. The supplied cron line assumes
-   `/usr/bin/docker`. Edit the deployment user's crontab and replace only a line
-   ending in `# log-catalog-cleanup`; preserve every unrelated entry. Install the
-   line from `deploy/log-catalog.cron`. It has no username field because it is for
-   a user crontab. Run its cleanup command once with no browser traffic and confirm
-   it reports only `removed`, `skipped`, and `failed` counts.
+5. If the deployment user's crontab has a legacy line ending in
+   `# log-catalog-cleanup`, use `crontab -e` to remove only that line. Preserve
+   every unrelated entry. Do not install a replacement cron entry; the Compose
+   `cleanup` service owns the schedule. Confirm `docker compose ps` reports both
+   `log-reader` and `cleanup` running and `log-reader` healthy.
 
 6. Through authenticated HTTPS, upload, save, edit, reanalyze, download the
    original, view/download text, and delete a disposable test log. Confirm a saved
@@ -249,15 +252,13 @@ The proxy does not cache private downloads. Its read/send timeouts match the
 
 Use one consistent snapshot procedure:
 
-1. Save the current crontab, then use `crontab -e` to remove only the line marked
-   `log-catalog-cleanup` from the installed crontab:
+1. Stop cleanup before the application so neither process can change catalog data:
 
    ```bash
-   crontab -l > /tmp/log-catalog.crontab.before-backup
+   docker compose stop cleanup log-reader
    ```
 
-2. Run `docker compose stop log-reader`.
-3. Archive the entire `log-dashboard/catalog-data` directory, including ownership
+2. Archive the entire `log-dashboard/catalog-data` directory, including ownership
    and permissions, to a new restricted backup file. Set `CATALOG_BACKUP_ARCHIVE`
    to an absolute path on backup storage, confirm it does not exist, then run from
    the repository root:
@@ -277,17 +278,26 @@ Use one consistent snapshot procedure:
    fi
    ```
 
-4. Run `docker compose start log-reader`, restore the one marked cron line without
-   changing unrelated jobs, and confirm the container is healthy.
-5. Verify an authenticated catalog listing and one saved original download.
+3. Start the application, wait until it is healthy, then start cleanup:
 
-To restore, get separate confirmation before changing live catalog data. Disable
-the named cleanup job and stop this application first. Restore the database and
-the `files` directory together from one archive; never overwrite a running catalog.
+   ```bash
+   docker compose start log-reader
+   ```
+
+   Wait for `docker compose ps` to report `log-reader` healthy, then run
+   `docker compose start cleanup`. If Compose must recreate containers with device ingestion
+   enabled, use the private `--env-file` deployment command instead. Do not
+   recreate the application without that file.
+4. Verify an authenticated catalog listing and one saved original download.
+
+To restore, get separate confirmation before changing live catalog data. Run
+`docker compose stop cleanup log-reader` first. Restore the database and the
+`files` directory together from one archive; never overwrite a running catalog.
 Move the stopped current directory to a separately named recovery location before
 extracting the archive. Run `sudo tar --numeric-owner -xzpf
-"$CATALOG_BACKUP_ARCHIVE" -C log-dashboard`, restart, restore the named cron line,
-and verify metadata plus original-byte hashes.
+"$CATALOG_BACKUP_ARCHIVE" -C log-dashboard`, then start `log-reader`. After it is
+healthy, start `cleanup`. Verify metadata plus original-byte hashes. Compose never
+restores a backup automatically.
 
 ## Checks
 

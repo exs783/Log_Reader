@@ -1,5 +1,6 @@
 services:
   log-reader:
+    image: ${COMPOSE_PROJECT_NAME}-log-reader
     build:
       context: .
     ports:
@@ -23,3 +24,23 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  cleanup:
+    image: ${COMPOSE_PROJECT_NAME}-log-reader
+    command:
+      - sh
+      - -ec
+      - |
+        trap 'exit 0' TERM INT
+        while true; do
+          python catalog.py cleanup --data-dir /app/catalog-data
+          sleep 300 &
+          wait
+        done
+    volumes:
+      - ./log-dashboard/catalog-data:/app/catalog-data
+    depends_on:
+      log-reader:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true

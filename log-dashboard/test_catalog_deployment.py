@@ -5,7 +5,9 @@ import io
 import json
 import os
 import re
+import select
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -247,6 +249,74 @@ http {{
         self.assertNotEqual(completed.returncode, 0)
         self.assertEqual(completed.stdout, 'removed=0 skipped=0 failed=1\n')
         self.assertEqual(completed.stderr, '')
+
+    @unittest.skipUnless(shutil.which('docker'), 'Docker Compose required')
+    def test_compose_cleanup_repeats_and_preserves_saved_logs(self):
+        project = Path(__file__).resolve().parents[1]
+        rendered = subprocess.run(
+            ['docker', 'compose', 'config', '--format', 'json'], cwd=project,
+            env={**os.environ, 'INGEST_API_KEY': 'fixture-key'},
+            capture_output=True, text=True, check=True,
+        )
+        services = json.loads(rendered.stdout)['services']
+        self.assertIn('cleanup', services)
+        cleanup = services['cleanup']
+        self.assertEqual(cleanup['image'], services['log-reader']['image'])
+        self.assertEqual(cleanup['restart'], 'unless-stopped')
+        self.assertEqual(cleanup['depends_on']['log-reader']['condition'], 'service_healthy')
+        self.assertFalse(cleanup.get('ports'))
+        self.assertNotIn('INGEST_API_KEY', cleanup.get('environment', {}))
+        self.assertEqual(len(cleanup['volumes']), 1)
+        self.assertIn(cleanup['volumes'][0], services['log-reader']['volumes'])
+
+        store, expired_id, saved_id = self._store_with_expired_and_saved()
+        sandbox = Path(self.directory.name)
+        bin_dir = sandbox / 'bin'
+        bin_dir.mkdir()
+        # Keep the real cleanup process; shorten only its external sleep for the test.
+        sleeper = bin_dir / 'sleep'
+        sleeper.write_text(
+            '#!/bin/sh\nprintf "%s\\n" "$1" >> "$SLEEP_CALLS"\nexec /bin/sleep 0.1\n'
+        )
+        sleeper.chmod(0o700)
+        calls = sandbox / 'sleep-calls'
+        environment = {
+            **os.environ,
+            'PATH': f'{bin_dir}:{Path(sys.executable).parent}:{os.environ["PATH"]}',
+            'SLEEP_CALLS': str(calls),
+        }
+        command = [part.replace('/app/catalog-data', str(self.root))
+                   for part in cleanup['command']]
+        with subprocess.Popen(
+            command, cwd=project / 'log-dashboard', env=environment,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True,
+        ) as process:
+            try:
+                self.assertTrue(select.select([process.stdout], [], [], 5)[0])
+                self.assertEqual(process.stdout.readline(), b'removed=1 skipped=0 failed=0\n')
+                _, second = store.ingest(
+                    io.BytesIO(b'second expired'), 'second.bin',
+                    lambda path, name: {'success': True},
+                )
+                deadline = time.monotonic() + 5
+                while True:
+                    self.assertTrue(select.select(
+                        [process.stdout], [], [], max(0, deadline - time.monotonic())
+                    )[0], 'cleanup did not repeat')
+                    line = process.stdout.readline()
+                    self.assertTrue(line, 'cleanup loop exited early')
+                    if line == b'removed=1 skipped=0 failed=0\n':
+                        break
+                    self.assertLess(time.monotonic(), deadline)
+                for removed_id in (expired_id, second['id']):
+                    with self.assertRaises(CatalogError):
+                        store.get(removed_id)
+                self.assertEqual(store.get(saved_id)['display_name'], 'Keep')
+                self.assertEqual([p.read_bytes() for p in store.files.iterdir()], [b'keep'])
+                self.assertEqual(set(calls.read_text().splitlines()), {'300'})
+            finally:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5)
 
     def test_wsgi_startup_sweeps_before_serving_a_request(self):
         _, expired_id, saved_id = self._store_with_expired_and_saved()
