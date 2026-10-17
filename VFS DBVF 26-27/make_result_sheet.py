@@ -26,7 +26,7 @@ REF_PACK = "Tattu-RLine5-2200-6S-150C"
 MIN_TW = 1.8  # loaded thrust-to-weight floor for a controllable multirotor
 INK, INK2, MUTED, GRID, SURFACE = "#0b0b0b", "#52514e", "#898781", "#e4e3df", "#fcfcfb"
 BRANDS = {"TMOTOR": ("T-Motor", "#2a78d6", "o"), "KDE": ("KDE Direct", "#eb6834", "s"),
-          "VERTIQ": ("Vertiq", "#1baf7a", "^")}
+          "VERTIQ": ("Vertiq", "#1baf7a", "^"), "MAD": ("MAD", "#8a4fd6", "D")}
 plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 8, "text.color": INK,
                      "axes.edgecolor": MUTED, "axes.labelcolor": INK2, "xtick.color": INK2,
                      "ytick.color": INK2, "figure.facecolor": "white"})
@@ -38,7 +38,9 @@ def load():
            for e in json.load(open(f))}
     bats = {b.name: b for b in mm.load_batteries(os.path.join(HERE, "Batteries"))}
     payload_g = mm.DEFAULT_PAYLOAD_LB * mm.LB_TO_G
-    df["brand"] = df.motor_model.str.extract(r"^(TMOTOR|KDE|VERTIQ)")[0]
+    df["brand"] = df.motor_model.str.extract(r"^(TMOTOR|KDE|VERTIQ|MAD)")[0]
+    # series-stacked packs ("<pack>_x2S", e.g. 12S motors) key on the base pack: amps and mAh don't change in series
+    df["battery"] = df.battery.str.replace(r"_x\dS$", "", regex=True)
     df["loaded_tw"] = [4 * max(cfg[m]["thrust_g"]) / (t + payload_g) for m, t in zip(df.motor_model, df.total_mass_g)]
     df["peak_a"] = [4 * max(cfg[m]["current_a"]) for m in df.motor_model]
     df["pack_a"] = [bats[b].capacity_mah / 1000 * float(b.rsplit("-", 1)[1].rstrip("C")) for b in df.battery]
@@ -79,7 +81,7 @@ def table(fig, rect, rows, cols, widths, fontsize=7.5, highlight=(), row_scale=1
 
 def short(m):
     return (m.replace("TMOTOR_MN6007II_KV320_", "T-Motor MN6007II ").replace("_ESTIMATED", " (est.)")
-             .replace("VERTIQ_", "Vertiq ").replace("_", " "))
+             .replace("VERTIQ_", "Vertiq ").replace("MAD_V62_IPE_280KV_Fluxer", "MAD V62 280KV 12S Fluxer ").replace("_", " "))
 
 
 def build(out_path):
