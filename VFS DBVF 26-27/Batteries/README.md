@@ -1,7 +1,8 @@
 # Battery sourcing notes
 
-The DBVF 26-27 lineup is all 6S packs, since that's the voltage the MN6007II KV320
-sheet was measured at. They run from 1.3 to 30 Ah so the sweep can find the
+The 26-27 RFP (v1, 9/21/2026) sets no cell-count or voltage limit (the 6S / 2-in-series
+limit was in the 2025 RFP), so `12S_packs.json` adds 12S packs for the 12S motor curves.
+The 6S lineup is what the MN6007II KV320 sheet was measured at. They run from 1.3 to 30 Ah so the sweep can find the
 smallest pack that flies the whole mission. Every mass is the manufacturer's
 listed net weight (+/-20 g) and every price is the genstattu.com list price
 (Sept 2026):
@@ -20,3 +21,17 @@ listed net weight (+/-20 g) and every price is the genstattu.com list price
 
 The model doesn't check C rating. Before picking a pack, check that
 capacity x C covers peak current: rotors x 44.2 A at full throttle on the P22.
+
+## 12S packs (`12S_packs.json`)
+
+| Pack | Net weight | Price | Page |
+|---|---|---|---|
+| Tattu 10000 30C | 2800 g | $467.62 | https://genstattu.com/ta-30c-10000-12s1p-as150u.html |
+| Tattu Plus 16000 15C | 4250 g (page also says 4141 g) | $695.99 | https://genstattu.com/tattu-plus-1-0-compact-version-16000mah-44-4v-15c-12s1p-lipo-smart-battery-pack-with-as150u-plug/ |
+| GAONENG GNB4000 HV 70C | 950 g (+/-45 g) | $221.12 | https://rcdrone.top/products/gaoneng-gnb400012s70ahvl-lipo-battery |
+| Gens Ace 5000 60C | 1600 g | $249.99 | https://www.amainhobbies.com/gens-ace-12s-lipo-battery-60c-44.4v-5000mah-gea12s500060/p1336173 |
+
+The GAONENG is an HV (4.35 V) pack. The RFP allows it only charged to 4.2 V per cell, so its
+real capacity is below the 4000 mAh rating, which the model uses as listed. The 16000 mAh
+pack is too heavy for the 10 lb unloaded target. Two 6S packs of one size also stack
+automatically to 12S (series keeps mAh, doubles volts).

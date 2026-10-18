@@ -59,6 +59,38 @@ one page per module/prop at https://www.vertiq.co/thrust-data (e.g.
 - Skipped: props under 12" (not enough thrust for this airframe), P24/G27/P28/MEJ24
   (no published blade weight), and every 81-08 test except one 24" prop (not 6S).
 
+# MAD Components (mad-motor.com -- Chinese maker, sold via rcdrone.top / OZ Robotics)
+
+Every curve is MAD's own published test table (6S/8S/12S, AMPX ESC), copied from the
+table images on each product page. The images were OCR'd, every row was checked
+(V x I = input power, thrust/W matches the printed column, thrust and current rise with
+throttle), and the rows OCR couldn't read were typed in by eye. A few rows are inconsistent
+in MAD's own table (e.g. 5008 300KV Havoc 30%: 22.0 W vs 24.28 V x 0.94 A); copied as published.
+Curves start at 30% throttle.
+
+- **V62 IPE 280KV** (`MAD_V62_IPE_280KV.json`): 12S, Fluxer VTOL 18.1x7.2. 270 g, $128.
+  Prop mass 32 g is a **placeholder** (T-Motor V18x7.2; MAD doesn't publish it), $39.50 is
+  half the $79 pair price (ozrobotics.com).
+- **7005 EEE 115KV (12S) / 230KV (6S)** (`MAD_7005_EEE.json`): Fluxer Pro 24x7.2. 186 g
+  (page also lists 196 g), $199. Prop 60 g (rcdrone.top), $84.95 = half the $169.90 pair
+  price (ozrobotics.com). Most efficient motors in the sweep, but needs 24" of rotor clearance.
+- **5008 EEE, all KVs** (`MAD_5008_EEE.json`): $76. Weight from each KV's data sheet:
+  170KV 130 g, 240KV 131 g, 300KV 127 g, 340KV 127 g, 400KV 138 g.
+
+| KV | Cells | Props tested |
+|---|---|---|
+| 170 | 12S | Fluxer Pro 17x5.8, 18x6.1; Havoc 18x5.7 |
+| 240 | 6S | Fluxer Pro 20x6.0, 21x6.3, 22x6.6; Havoc 22x7.0 |
+| 240 | 8S | Fluxer Pro 17x5.8, 18x6.1; Havoc 18x5.7 (no 8S pack, so unused) |
+| 300 | 6S | Fluxer Pro 18x6.1, 19x5.7, 20x6.0; Havoc 18x5.7 |
+| 340 | 6S | Fluxer Pro 17x5.8, 18x6.1, 19x5.7; Havoc 18x5.7 |
+| 400 | 6S | Fluxer Pro 16x5.4, 17x5.8 |
+
+  Prop mass is the single-prop weight on the rcdrone.top listing (Fluxer 16x5.4 28 g,
+  17x5.8 32.5 g, 18x6.1 31.5 g, 19x5.7 41 g, 20x6.0 47 g, 21x6.3 58 g, 22x6.6 56 g;
+  Havoc 18x5.7 47 g, 22x7.0 65 g). Fluxer prices are half the listed price (listed as
+  pairs, though not every listing says so); Havoc is the listed price (sold push/pull, single).
+
 # Checked, no public thrust data (not added)
 
 - Ewing Motors 3115 860KV (Ashland, OH, made in USA): no thrust/current sheet published.
