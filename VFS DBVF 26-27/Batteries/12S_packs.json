@@ -1,0 +1,6 @@
+[
+    {"name": "Tattu-10000-12S-30C", "mass_g": 2800, "capacity_mah": 10000, "cost_usd": 467.62, "cells_s": 12},
+    {"name": "Tattu-Plus-16000-12S-15C", "mass_g": 4250, "capacity_mah": 16000, "cost_usd": 695.99, "cells_s": 12},
+    {"name": "GAONENG-GNB-4000-12S-70C", "mass_g": 950, "capacity_mah": 4000, "cost_usd": 221.12, "cells_s": 12},
+    {"name": "GensAce-5000-12S-60C", "mass_g": 1600, "capacity_mah": 5000, "cost_usd": 249.99, "cells_s": 12}
+]
